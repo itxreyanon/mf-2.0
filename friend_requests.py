@@ -9,6 +9,8 @@ from db import get_individual_spam_filter, is_already_sent, add_sent_id, get_act
 from collections import defaultdict
 import time
 from dateutil import parser
+from filters import apply_nationality_filter
+from db import get_user_filters
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -55,6 +57,23 @@ async def fetch_users(session, token):
     except Exception as e:
         logging.error(f"Fetch users failed: {e}")
         return []
+
+async def apply_account_filter_before_fetch(token, user_id):
+    """Apply the account's nationality filter before fetching users"""
+    try:
+        # Get stored filters for this token
+        user_filters = get_user_filters(user_id, token)
+        if user_filters and "filterNationalityCode" in user_filters:
+            nationality_code = user_filters["filterNationalityCode"]
+            success, message = await apply_nationality_filter(token, nationality_code)
+            if success:
+                logging.info(f"Applied nationality filter: {nationality_code or 'All Countries'}")
+            else:
+                logging.warning(f"Failed to apply nationality filter: {message}")
+        else:
+            logging.info("No nationality filter set for this account")
+    except Exception as e:
+        logging.error(f"Error applying account filter: {e}")
 
 def format_user(user):
     def time_ago(dt_str):
@@ -271,6 +290,9 @@ async def run_requests(user_id, bot, target_channel_id):
 
                 # Fetch users
                 try:
+                    # Apply account's nationality filter before fetching
+                    await apply_account_filter_before_fetch(token, user_id)
+                    
                     users = await fetch_users(session, token)
                     state["batch_index"] += 1
                     
@@ -381,6 +403,9 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
             async with aiohttp.ClientSession() as session:
                 while state["running"]:
                     try:
+                        # Apply account's nationality filter before fetching
+                        await apply_account_filter_before_fetch(token, user_id)
+                        
                         users = await fetch_users(session, token)
                         
                         if users is None:
