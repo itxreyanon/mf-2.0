@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, CallbackQuery
 from collections import defaultdict
-
+from aiogram.exceptions import TelegramBadRequest
 # Import custom modules
 from db import (
     set_token, get_tokens, set_current_account, get_current_account, delete_token,
@@ -26,6 +26,7 @@ from filters import meeff_filter_command, set_account_filter, get_meeff_filter_m
 from allcountry import run_all_countries
 from signup import signup_command, signup_callback_handler, signup_message_handler, signup_settings_command
 from friend_requests import run_requests, process_all_tokens, user_states, stop_markup
+from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
 
 # Configuration constants
 API_TOKEN = "7916536914:AAHwtvO8hfGl2U4xcfM1fAjMLNypPFEW5JQ"
@@ -256,7 +257,7 @@ async def send_lounge_all(message: Message) -> None:
     status = await message.reply(status_text, parse_mode="HTML")
 
     try:
-        await send_lounge_all_tokens(active_tokens_data, custom_message, status, bot, user_id, spam_enabled)
+        await send_lounge_all_tokens(active_tokens_data, custom_message, status, bot, user_id, spam_enabled, user_id)
     except Exception as e:
         await status.edit_text(f"Error sending lounge messages: {str(e)}")
         logger.error(f"Error in /send_lounge_all: {str(e)}")
@@ -320,7 +321,7 @@ async def send_to_all_command(message: Message) -> None:
     status_message = await message.reply(status_text, parse_mode="HTML")
 
     try:
-        total, sent, filtered = await send_message_to_everyone(token, custom_message, status_message, bot, user_id, spam_enabled)
+        total, sent, filtered = await send_message_to_everyone(token, custom_message, user_id, spam_enabled, user_id)
         await status_message.edit_text(
             f"<b>Chatroom Messages Complete</b>\n\n<b>Results:</b>\n• Total chatrooms: <code>{total}</code>\n"
             f"• Messages sent: <code>{sent}</code>\n• Filtered: <code>{filtered}</code>",
@@ -359,7 +360,7 @@ async def send_chat_all(message: Message) -> None:
     status = await message.reply(status_text, parse_mode="HTML")
 
     try:
-        await send_message_to_everyone_all_tokens(tokens, custom_message, status, bot, user_id, spam_enabled, token_names)
+        await send_message_to_everyone_all_tokens(tokens, custom_message, status, bot, user_id, spam_enabled, token_names, False, user_id)
     except Exception as e:
         await status.edit_text(f"<b>Error</b>\n\nFailed to send messages: {str(e)[:200]}", parse_mode="HTML")
         logger.error(f"Error in /send_chat_all: {str(e)}")
@@ -440,7 +441,12 @@ async def add_person_command(message: Message) -> None:
 
     person_id = args[1]
     url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={person_id}&isOkay=1"
-    headers = {"meeff-access-token": token}
+    
+    # Get device info for this token
+    device_info = get_or_create_device_info_for_token(user_id, token)
+    base_headers = {"meeff-access-token": token}
+    headers = get_headers_with_device_info(base_headers, device_info)
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as response:
@@ -507,7 +513,11 @@ async def handle_new_token(message: Message) -> None:
         verification_msg = await message.reply("<b>Verifying Token</b>...", parse_mode="HTML")
         url = "https://api.meeff.com/facetalk/vibemeet/history/count/v1"
         params = {'locale': "en"}
-        headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'meeff-access-token': token}
+        
+        # Get or create device info for this token
+        device_info = get_or_create_device_info_for_token(user_id, token)
+        base_headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'meeff-access-token': token}
+        headers = get_headers_with_device_info(base_headers, device_info)
 
         async with aiohttp.ClientSession() as session:
             try:
@@ -523,6 +533,8 @@ async def handle_new_token(message: Message) -> None:
 
         account_name = token_data[1] if len(token_data) > 1 else f"Account {len(get_tokens(user_id)) + 1}"
         set_token(user_id, token, account_name)
+        
+        # Store device info for this token (already created above)
         await verification_msg.edit_text(
             f"<b>Token Verified</b> and saved as '<code>{html.escape(account_name)}</code>'.",
             parse_mode="HTML"
@@ -537,6 +549,7 @@ async def show_manage_accounts_menu(callback_query: CallbackQuery) -> None:
     current_token = get_current_account(user_id)
 
     if not tokens:
+        # This part is fine, as it's a different message content
         await callback_query.message.edit_text(
             "<b>No Accounts Found</b>\n\nSend a token to add an account.",
             reply_markup=back_markup,
@@ -557,11 +570,26 @@ async def show_manage_accounts_menu(callback_query: CallbackQuery) -> None:
     buttons.append([InlineKeyboardButton(text="Back", callback_data="settings_menu")])
 
     current_text = "A current account is set." if current_token else "No current account is set."
-    await callback_query.message.edit_text(
-        f"<b>Manage Accounts</b>\n\n{current_text}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML"
-    )
+    message_text = f"<b>Manage Accounts</b>\n\n{current_text}"
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    # --- START OF FIX ---
+    try:
+        await callback_query.message.edit_text(
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in e.message:
+            # This error is safe to ignore, it just means the menu is already up-to-date.
+            await callback_query.answer() # Acknowledge the button press without an alert
+            logger.info("Message not modified, skipping edit.")
+        else:
+            # If it's a different error, we should still see it.
+            logger.error(f"Error editing message: {e}")
+            raise
+
 
 @router.callback_query()
 async def callback_handler(callback_query: CallbackQuery) -> None:
@@ -660,7 +688,7 @@ async def callback_handler(callback_query: CallbackQuery) -> None:
             "<b>Unsubscribing Current Account</b>...",
             parse_mode="HTML"
         )
-        await unsubscribe_everyone(token, status_message=msg, bot=bot, chat_id=user_id)
+        await unsubscribe_everyone(token, status_message=msg, bot=bot, chat_id=user_id, user_id=user_id)
     elif data == "confirm_unsub_all":
         active_tokens = get_active_tokens(user_id)
         if not active_tokens:
@@ -680,7 +708,7 @@ async def callback_handler(callback_query: CallbackQuery) -> None:
                 f"Processing account {i}/{len(active_tokens)}: {html.escape(token_obj['name'])}",
                 parse_mode="HTML"
             )
-            await unsubscribe_everyone(token_obj["token"])
+            await unsubscribe_everyone(token_obj["token"], user_id=user_id)
             total += 1
         await msg.edit_text(
             f"<b>Unsubscribe Complete</b>\nSuccessfully unsubscribed {total} accounts.",
