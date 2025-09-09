@@ -5,6 +5,7 @@ from db import get_current_account, get_user_filters, set_user_filters, get_toke
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import asyncio
 import aiohttp
+from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
 
 # Global state for filter settings
 user_filter_states = {}
@@ -152,12 +153,16 @@ async def apply_filter_for_account(token, user_id):
         }
         
         url = "https://api.meeff.com/user/updateFilter/v1"
-        headers = {
+        base_headers = {
             'User-Agent': "okhttp/4.12.0",
             'Accept-Encoding': "gzip",
             'meeff-access-token': token,
             'content-type': "application/json; charset=utf-8"
         }
+        
+        # Get device info for this token
+        device_info = get_or_create_device_info_for_token(user_id, token)
+        headers = get_headers_with_device_info(base_headers, device_info)
         
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=filter_data, headers=headers) as response:
