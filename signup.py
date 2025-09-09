@@ -3,11 +3,13 @@ import json
 import random
 import itertools
 import logging
-import secrets
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dateutil import parser
+import logging
+# --- IMPORT THE NEW DEVICE INFO MODULE ---
+from device_info import get_or_create_device_info_for_email, get_api_payload_with_device_info
 
 from db import (
     set_token,
@@ -18,45 +20,6 @@ from db import (
 
 # Logging configuration
 logger = logging.getLogger(__name__)
-
-# --- Device Configuration ---
-DEVICE_PROFILES = [
-    {
-        "os": "iOS 17.5.1",
-        "platform": "ios",
-        "device": "BRAND: Apple, MODEL: iPhone16,2, DEVICE: iPhone 15 Pro, PRODUCT: iPhone15Pro",
-        "appVersion": "6.6.2",
-        "userAgent": "okhttp/5.0.0-alpha.14"
-    },
-    {
-        "os": "Android 14",
-        "platform": "android",
-        "device": "BRAND: samsung, MODEL: SM-S928B, DEVICE: dm3q, PRODUCT: dm3qxxx",
-        "appVersion": "6.5.1",
-        "userAgent": "okhttp/4.12.0"
-    },
-    {
-        "os": "iOS 16.7.2",
-        "platform": "ios",
-        "device": "BRAND: Apple, MODEL: iPhone14,5, DEVICE: iPhone 13, PRODUCT: iPhone13",
-        "appVersion": "6.6.0",
-        "userAgent": "okhttp/5.0.0-alpha.14"
-    },
-    {
-        "os": "Android 13",
-        "platform": "android",
-        "device": "BRAND: google, MODEL: Pixel 7 Pro, DEVICE: panther, PRODUCT: panther",
-        "appVersion": "6.4.8",
-        "userAgent": "okhttp/4.12.0"
-    }
-]
-
-def get_random_device_info() -> Dict:
-    """Selects a random device profile and generates unique identifiers."""
-    profile = random.choice(DEVICE_PROFILES).copy()
-    profile['deviceUniqueId'] = secrets.token_hex(8)
-    profile['pushToken'] = f"{secrets.token_urlsafe(22)}:{secrets.token_urlsafe(115)}"
-    return profile
 
 # Configuration constants
 DEFAULT_BIOS = [
@@ -306,8 +269,6 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             )
         else:
             state["stage"] = "multi_ask_name"
-            # --- MODIFIED: Store device info for the session ---
-            state['device_info'] = get_random_device_info()
             user_signup_states[user_id] = state
             await callback.message.edit_text(
                 "<b>Multi Signup</b>\n\nEnter the name for the accounts (e.g., 'David').",
@@ -321,7 +282,6 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         config = get_signup_config(user_id) or {}
         email_variations = generate_email_variations(config.get("email", ""), 50)
         created_accounts, email_idx = [], 0
-        device_info = state.get('device_info') # Get session device info
         while len(created_accounts) < 5 and email_idx < len(email_variations):
             email = email_variations[email_idx]
             email_idx += 1
@@ -338,8 +298,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 "birth_year": config.get("birth_year", 2000),
                 "nationality": config.get("nationality", "US")
             }
-            # --- MODIFIED: Pass device info to function ---
-            res = await try_signup(acc_state, device_info)
+            res = await try_signup(acc_state, user_id)
             if res.get("user", {}).get("_id"):
                 created_accounts.append({
                     "email": email,
@@ -367,10 +326,8 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             return True
         await callback.message.edit_text("<b>Verifying Accounts</b>...", parse_mode="HTML")
         verified, failed = [], []
-        device_info = state.get('device_info') # Get session device info
         for acc in created_accounts:
-            # --- MODIFIED: Pass device info to function ---
-            res = await try_signin(acc["email"], acc["password"], device_info)
+            res = await try_signin(acc["email"], acc["password"], user_id)
             if res.get("accessToken"):
                 set_token(user_id, res["accessToken"], acc["name"], acc["email"])
                 if res.get("user"):
@@ -398,8 +355,6 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             parse_mode="HTML"
         )
     elif data == "signup_go":
-        # --- MODIFIED: Store device info for the session ---
-        state['device_info'] = get_random_device_info()
         config = get_signup_config(user_id) or {}
         if config.get('auto_signup', False) and all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
             state["stage"] = "auto_signup_ask_name"
@@ -429,8 +384,6 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         )
     elif data == "signin_go":
         state["stage"] = "signin_email"
-        # --- MODIFIED: Store device info for the session ---
-        state['device_info'] = get_random_device_info()
         await callback.message.edit_text(
             "<b>Sign In</b>\n\nEnter your email address:",
             reply_markup=BACK_TO_SIGNUP,
@@ -442,9 +395,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             await callback.answer("No signup info. Please start over.", show_alert=True)
             return True
         await callback.message.edit_text("<b>Verifying Account</b>...", parse_mode="HTML")
-        device_info = state.get('device_info') # Get session device info
-        # --- MODIFIED: Pass device info to function ---
-        res = await try_signin(creds['email'], creds['password'], device_info)
+        res = await try_signin(creds['email'], creds['password'], user_id)
         if res.get("accessToken"):
             await store_token_and_show_card(callback.message, res, creds)
         else:
@@ -485,9 +436,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 "nationality": config.get("nationality")
             })
         
-        device_info = state.get('device_info') # Get session device info
-        # --- MODIFIED: Pass device info to function ---
-        res = await try_signup(state, device_info)
+        res = await try_signup(state, user_id)
         if res.get("user", {}).get("_id"):
             state["creds"] = {"email": state["email"], "password": state["password"], "name": state["name"]}
             state["stage"] = "await_verify"
@@ -653,9 +602,7 @@ async def signup_message_handler(message: Message) -> bool:
         )
     elif stage == "signin_password":
         msg = await message.answer("<b>Signing In</b>...", parse_mode="HTML")
-        device_info = state.get('device_info') # Get session device info
-        # --- MODIFIED: Pass device info to function ---
-        res = await try_signin(state["signin_email"], text, device_info)
+        res = await try_signin(state["signin_email"], text, user_id)
         if res.get("accessToken"):
             await store_token_and_show_card(msg, res, {"email": state["signin_email"], "password": text})
         else:
@@ -724,45 +671,34 @@ async def meeff_upload_image(img_bytes: bytes) -> Optional[str]:
         logger.error(f"Error uploading image to Meeff: {e}")
         return None
 
-# --- MODIFIED: Function now accepts device_info argument ---
-async def try_signup(state: Dict, device_info: Dict) -> Dict:
-    """Attempt to sign up a new user with the provided state."""
+async def try_signup(state: Dict, telegram_user_id: int) -> Dict:
+    """Attempt to sign up a new user, using device info from the DB."""
     url = "https://api.meeff.com/user/register/email/v4"
-    payload = {
-        "providerId": state["email"],
-        "providerToken": state["password"],
-        "name": state["name"],
-        "gender": state["gender"],
-        "birthYear": state.get("birth_year", 2004),
-        "nationalityCode": state.get("nationality", "US"),
-        "description": state["desc"],
-        "photos": "|".join(state.get("photos", [])) or DEFAULT_PHOTOS,
-        "os": device_info["os"],
-        "platform": device_info["platform"],
-        "device": device_info["device"],
-        "appVersion": device_info["appVersion"],
-        "deviceUniqueId": device_info["deviceUniqueId"],
-        "pushToken": device_info["pushToken"],
-        "locale": "en",
-        "deviceLanguage": "en",
-        "deviceRegion": "US",
-        "simRegion": "US",
-        "deviceGmtOffset": "-0800",
-        "color": "777777",
-        "birthMonth": 3,
-        "birthDay": 1,
-        "languages": "en,es,fr",
-        "levels": "5,1,1",
-        "purpose": "PB000000,PB000001",
-        "purposeEtcDetail": "",
+    
+    # Get or create device info for this specific email
+    device_info = get_or_create_device_info_for_email(telegram_user_id, state["email"])
+    
+    # --- ADDED FOR DEBUGGING ---
+    unique_id = device_info.get("device_unique_id")
+    logging.warning(f"SIGN UP using Device ID: {unique_id} for email {state['email']}")
+    # ---------------------------
+    
+    # Define the base payload without device-specific keys
+    base_payload = {
+        "providerId": state["email"], "providerToken": state["password"], "name": state["name"],
+        "gender": state["gender"], "birthYear": state.get("birth_year", 2004),
+        "nationalityCode": state.get("nationality", "US"), "description": state["desc"],
+        "photos": "|".join(state.get("photos", [])) or DEFAULT_PHOTOS, "locale": "en",
+        "color": "777777", "birthMonth": 3, "birthDay": 1, "languages": "en,es,fr",
+        "levels": "5,1,1", "purpose": "PB000000,PB000001", "purposeEtcDetail": "",
         "interest": "IS000001,IS000002,IS000003,IS000004",
-        "deviceRooted": 0,
-        "deviceEmulator": 0
     }
-    headers = {
-        'User-Agent': device_info["userAgent"],
-        'Content-Type': "application/json; charset=utf-8"
-    }
+    
+    # Use the helper to merge the device info into the payload
+    payload = get_api_payload_with_device_info(base_payload, device_info)
+    
+    headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'Content-Type': "application/json; charset=utf-8"}
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers) as response:
@@ -771,32 +707,26 @@ async def try_signup(state: Dict, device_info: Dict) -> Dict:
         logger.error(f"Error during signup: {e}")
         return {"errorMessage": "Failed to register account."}
 
-# --- MODIFIED: Function now accepts device_info argument ---
-async def try_signin(email: str, password: str, device_info: Dict) -> Dict:
-    """Attempt to sign in a user with the provided credentials."""
+async def try_signin(email: str, password: str, telegram_user_id: int) -> Dict:
+    """Attempt to sign in, using device info from the DB."""
     url = "https://api.meeff.com/user/login/v4"
-    payload = {
-        "provider": "email",
-        "providerId": email,
-        "providerToken": password,
-        "os": device_info["os"],
-        "platform": device_info["platform"],
-        "device": device_info["device"],
-        "pushToken": device_info["pushToken"],
-        "deviceUniqueId": device_info["deviceUniqueId"],
-        "appVersion": device_info["appVersion"],
-        "deviceLanguage": "en",
-        "deviceRegion": "US",
-        "simRegion": "US",
-        "deviceGmtOffset": "-0800",
-        "deviceRooted": 0,
-        "deviceEmulator": 0,
-        "locale": "en"
-    }
-    headers = {
-        'User-Agent': device_info["userAgent"],
-        'Content-Type': "application/json; charset=utf-8"
-    }
+    
+    # Get or create device info for this specific email
+    device_info = get_or_create_device_info_for_email(telegram_user_id, email)
+    
+    # --- ADDED FOR DEBUGGING ---
+    unique_id = device_info.get("device_unique_id")
+    logging.warning(f"SIGN IN using Device ID: {unique_id} for email {email}")
+    # ---------------------------
+
+    # Define the base payload
+    base_payload = {"provider": "email", "providerId": email, "providerToken": password, "locale": "en"}
+    
+    # Use the helper to merge the device info into the payload
+    payload = get_api_payload_with_device_info(base_payload, device_info)
+    
+    headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'Content-Type': "application/json; charset=utf-8"}
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers) as response:
@@ -804,6 +734,7 @@ async def try_signin(email: str, password: str, device_info: Dict) -> Dict:
     except Exception as e:
         logger.error(f"Error during signin: {e}")
         return {"errorMessage": "Failed to sign in."}
+
 
 async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds: Dict) -> None:
     """Store the access token and display the user card."""
