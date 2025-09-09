@@ -140,6 +140,8 @@ async def send_message_to_everyone(
             from_date = next_from
     return total_chatrooms, sent_count, filtered_count
 
+# CORRECTED AND REFACTORED CODE
+
 async def send_message_to_everyone_all_tokens(
     tokens: List[str],
     message: str,
@@ -148,54 +150,62 @@ async def send_message_to_everyone_all_tokens(
     chat_id: int = None,
     spam_enabled: bool = True,
     token_names: Dict[str, str] = None,
-    use_in_memory_deduplication: bool = False
+    use_in_memory_deduplication: bool = False,
+    user_id: int = None
 ) -> None:
     """
     Send messages to everyone for multiple tokens concurrently.
     Correctly handles and displays accounts that have the same name.
     """
-    # KEY CHANGE: The dictionary key is now the unique token.
-    # The value is a tuple containing: (display_name, rooms, sent, filtered, status)
-    token_status: Dict[str, Tuple[str, int, int, int, str]] = {}
-    sent_ids = set() if use_in_memory_deduplication else None
-    sent_ids_lock = asyncio.Lock() if use_in_memory_deduplication else None
+    token_status = {}
+    sent_ids = set() if use_in_memory_deduplication and spam_enabled else None
+    sent_ids_lock = asyncio.Lock() if sent_ids is not None else None
+    
+    # --- CHANGE: Added a reliable flag to control the UI loop ---
+    running = True
 
-    async def _worker(token: str, idx: int):
+    async def _worker(token: str):
         display_name = token_names.get(token, token[:6]) if token_names else token[:6]
-        # Use the token as the key for tracking
-        token_status[token] = (display_name, 0, 0, 0, "Processing")
+        token_status[token] = {'name': display_name, 'rooms': 0, 'sent': 0, 'filtered': 0, 'status': "Processing"}
 
         try:
             rooms, sent, filtered = await send_message_to_everyone(
                 token,
                 message,
-                status_message=None,
-                bot=None,
                 chat_id=chat_id,
                 spam_enabled=spam_enabled,
+                user_id=user_id,
                 sent_ids=sent_ids,
-                sent_ids_lock=sent_ids_lock
+                sent_ids_lock=sent_ids_lock,
+                status_entry=token_status[token] # Pass the dictionary for live updates
             )
-            logging.info(f"[{display_name} - {idx}/{len(tokens)}] Rooms: {rooms}, Sent: {sent}, Filtered: {filtered}")
-            token_status[token] = (display_name, rooms, sent, filtered, "Done")
+            token_status[token]['status'] = "Done"
             return True
         except Exception as e:
-            logging.error(f"[{display_name} - {idx}/{len(tokens)}] failed: {str(e)}")
-            token_status[token] = (display_name, 0, 0, 0, f"Failed: {str(e)[:20]}...")
+            logging.error(f"[{display_name}] failed: {str(e)}")
+            token_status[token]['status'] = f"Failed: {str(e)[:20]}..."
             return False
 
     async def _refresh_ui():
         last_message = ""
-        while any(status[4] in ["Processing", "Queued"] for status in token_status.values()):
+        while running: # --- CHANGE: Loop condition is now simpler and more reliable ---
             lines = [
                 "🔄 <b>Chatroom AIO Status</b>\n",
-                "<pre style='background-color:#f4f4f4;padding:5px;border-radius:5px;'>Account │Rooms │Sent │Filter │Status</pre>"
+                "<pre>Account    │Rooms │Sent  │Filter│Status</pre>"
             ]
-            # We iterate through the values, which contain the display name and stats
-            for name, rooms, sent, filtered, status in token_status.values():
+            
+            for status in token_status.values():
+                name = status.get('name', 'N/A')
+                rooms = status.get('rooms', 0)
+                sent = status.get('sent', 0)
+                filtered = status.get('filtered', 0)
+                stat = status.get('status', 'Queued')
+                
+                display_name = name[:10].ljust(10) if len(name) <= 10 else name[:9] + '…'
                 lines.append(
-                    f"<pre>{name:<8}│{rooms:>5} │{sent:>4} │{filtered:>6} │{status}</pre>"
+                    f"<pre>{display_name}│{rooms:>5} │{sent:>5} │{filtered:>6}│{stat}</pre>"
                 )
+            
             current_message = "\n".join(lines)
             if current_message != last_message and bot and chat_id and status_message:
                 try:
@@ -209,29 +219,32 @@ async def send_message_to_everyone_all_tokens(
                 except Exception as e:
                     if "message is not modified" not in str(e):
                         logging.error(f"Error updating status: {e}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
 
     # Initialize token status
     for token in tokens:
         display_name = token_names.get(token, token[:6]) if token_names else token[:6]
-        token_status[token] = (display_name, 0, 0, 0, "Queued")
-
-    if use_in_memory_deduplication:
-        logging.info("In-memory deduplication enabled")
-    if not spam_enabled:
-        logging.warning("Spam check disabled for all tokens; duplicates possible")
+        token_status[token] = {'name': display_name, 'rooms': 0, 'sent': 0, 'filtered': 0, 'status': "Queued"}
 
     ui_task = asyncio.create_task(_refresh_ui()) if bot and chat_id and status_message else None
-    worker_tasks = [_worker(token, idx) for idx, token in enumerate(tokens, start=1)]
-    results = await asyncio.gather(*worker_tasks)
+    
+    worker_tasks = [asyncio.create_task(_worker(token)) for token in tokens]
+    results = await asyncio.gather(*worker_tasks, return_exceptions=True)
 
+    # --- CHANGE: Proper cleanup of the background UI task ---
+    running = False
     if ui_task:
-        await ui_task
+        await asyncio.sleep(1.1) # Allow one final UI update
+        ui_task.cancel()
+        try:
+            await ui_task
+        except asyncio.CancelledError:
+            pass # Task cancellation is expected
 
-    successful_tokens = sum(1 for result in results if result)
-    grand_rooms = sum(rooms for _, rooms, _, _, _ in token_status.values())
-    grand_sent = sum(sent for _, _, sent, _, _ in token_status.values())
-    grand_filtered = sum(filtered for _, _, _, filtered, _ in token_status.values())
+    successful_tokens = sum(1 for result in results if result is True)
+    grand_rooms = sum(status.get('rooms', 0) for status in token_status.values())
+    grand_sent = sum(status.get('sent', 0) for status in token_status.values())
+    grand_filtered = sum(status.get('filtered', 0) for status in token_status.values())
 
     logging.info(
         f"[AllTokens] Finished: {successful_tokens}/{len(tokens)} tokens succeeded. "
@@ -242,12 +255,19 @@ async def send_message_to_everyone_all_tokens(
         success_rate = (successful_tokens / len(tokens)) * 100 if len(tokens) > 0 else 0
         success_emoji = "✅" if success_rate > 90 else "⚠️" if success_rate > 70 else "❌"
         lines = [
-            f"{success_emoji} <b>Chatroom AIO Completed</b> - {successful_tokens}/{len(tokens)} tokens ({success_rate:.1f}%)\n",
-            "<pre>Account │Rooms │Sent │Filter │Status</pre>"
+            f"{success_emoji} <b>Chatroom AIO Completed</b> - {successful_tokens}/{len(tokens)} ({success_rate:.1f}%)\n",
+            "<pre>Account    │Rooms │Sent  │Filter│Status</pre>"
         ]
-        for name, rooms, sent, filtered, status in token_status.values():
+        for status in token_status.values():
+            name = status.get('name', 'N/A')
+            rooms = status.get('rooms', 0)
+            sent = status.get('sent', 0)
+            filtered = status.get('filtered', 0)
+            stat = status.get('status', 'Done')
+            
+            display_name = name[:10].ljust(10) if len(name) <= 10 else name[:9] + '…'
             lines.append(
-                f"<pre>{name:<8}│{rooms:>5} │{sent:>4} │{filtered:>6} │{status}</pre>"
+                f"<pre>{display_name}│{rooms:>5} │{sent:>5} │{filtered:>6}│{stat}</pre>"
             )
         try:
             await bot.edit_message_text(
