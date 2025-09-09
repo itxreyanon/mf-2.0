@@ -4,24 +4,29 @@ import aiohttp
 import logging
 from typing import List, Dict
 from aiogram import types
+from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
 
 LOUNGE_URL = "https://api.meeff.com/lounge/dashboard/v1"
 CHATROOM_URL = "https://api.meeff.com/chatroom/open/v2"
 SEND_MESSAGE_URL = "https://api.meeff.com/chat/send/v2"
-HEADERS = {
+BASE_HEADERS = {
     'User-Agent': "okhttp/4.12.0",
     'Accept-Encoding': "gzip",
-    'content-type': "application/json; charset=utf-8",
-    'X-Device-Info': "iPhone15Pro-iOS17.5.1-6.6.2"
+    'content-type': "application/json; charset=utf-8"
 }
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-async def fetch_lounge_users(token: str) -> List[Dict]:
+async def fetch_lounge_users(token: str, user_id: int = None) -> List[Dict]:
     """Fetch users from lounge with improved error handling"""
-    headers = HEADERS.copy()
+    headers = BASE_HEADERS.copy()
     headers['meeff-access-token'] = token
+    
+    # Get device info for this token if user_id is provided
+    if user_id:
+        device_info = get_or_create_device_info_for_token(user_id, token)
+        headers = get_headers_with_device_info(headers, device_info)
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -40,11 +45,17 @@ async def fetch_lounge_users(token: str) -> List[Dict]:
             logger.error(f"Error fetching lounge users: {str(e)}")
             return []
 
-async def open_chatroom(token: str, user_id: str) -> str:
+async def open_chatroom(token: str, target_user_id: str, telegram_user_id: int = None) -> str:
     """Open chatroom with a user with retry logic"""
-    headers = HEADERS.copy()
+    headers = BASE_HEADERS.copy()
     headers['meeff-access-token'] = token
-    payload = {"waitingRoomId": user_id, "locale": "en"}
+    
+    # Get device info for this token if telegram_user_id is provided
+    if telegram_user_id:
+        device_info = get_or_create_device_info_for_token(telegram_user_id, token)
+        headers = get_headers_with_device_info(headers, device_info)
+    
+    payload = {"waitingRoomId": target_user_id, "locale": "en"}
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -55,7 +66,7 @@ async def open_chatroom(token: str, user_id: str) -> str:
                 timeout=10
             ) as response:
                 if response.status == 412:
-                    logger.info(f"User {user_id} has disabled chat")
+                    logger.info(f"User {target_user_id} has disabled chat")
                     return None
                 elif response.status != 200:
                     logger.warning(f"Failed to open chatroom (Status: {response.status})")
@@ -66,10 +77,16 @@ async def open_chatroom(token: str, user_id: str) -> str:
             logger.error(f"Error opening chatroom: {str(e)}")
             return None
 
-async def send_lounge_message(token: str, chatroom_id: str, message: str) -> bool:
+async def send_lounge_message(token: str, chatroom_id: str, message: str, user_id: int = None) -> bool:
     """Send message to a chatroom with error handling"""
-    headers = HEADERS.copy()
+    headers = BASE_HEADERS.copy()
     headers['meeff-access-token'] = token
+    
+    # Get device info for this token if user_id is provided
+    if user_id:
+        device_info = get_or_create_device_info_for_token(user_id, token)
+        headers = get_headers_with_device_info(headers, device_info)
+    
     payload = {
         "chatRoomId": chatroom_id,
         "message": message,
@@ -97,7 +114,8 @@ async def process_lounge_batch(
     users: List[Dict],
     message: str,
     chat_id: int,
-    spam_enabled: bool
+    spam_enabled: bool,
+    user_id: int = None
 ) -> int:
     """
     Process a batch of lounge users concurrently
@@ -119,7 +137,7 @@ async def process_lounge_batch(
     for user in users:
         user_id = user["user"]["_id"]
         tasks.append(process_single_lounge_user(
-            token, user, message, chat_id, spam_enabled
+            token, user, message, chat_id, spam_enabled, user_id
         ))
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -139,33 +157,34 @@ async def process_single_lounge_user(
     user: Dict,
     message: str,
     chat_id: int,
-    spam_enabled: bool
+    spam_enabled: bool,
+    user_id: int = None
 ) -> bool:
     """Process a single lounge user and return success status"""
-    user_id = user["user"].get("_id")
+    target_user_id = user["user"].get("_id")
     user_name = user["user"].get("name", "Unknown")
     
-    if not user_id:
+    if not target_user_id:
         logger.warning(f"User ID not found for user: {user}")
         return False
     
     # Open chatroom
-    chatroom_id = await open_chatroom(token, user_id)
+    chatroom_id = await open_chatroom(token, target_user_id, user_id)
     if not chatroom_id:
-        logger.warning(f"Failed to open chatroom with {user_name} ({user_id})")
+        logger.warning(f"Failed to open chatroom with {user_name} ({target_user_id})")
         return False
     
     # Send message
-    success = await send_lounge_message(token, chatroom_id, message)
+    success = await send_lounge_message(token, chatroom_id, message, user_id)
     if success:
-        logger.info(f"Sent message to {user_name} ({user_id})")
+        logger.info(f"Sent message to {user_name} ({target_user_id})")
         return True
     return False
 
 
 async def send_lounge(
-    token: str, message: str, status_message: types.Message,
-    bot, chat_id: int, spam_enabled: bool, batch_size: int = 20
+    token: str, message: str, status_message: types.Message, 
+    bot, chat_id: int, spam_enabled: bool, batch_size: int = 20, user_id: int = None
 ) -> None:
     total_sent = total_filtered = 0
 
@@ -178,7 +197,7 @@ async def send_lounge(
 
     try:
         await upd("⏳ loading…")
-        while users := await fetch_lounge_users(token):
+        while users := await fetch_lounge_users(token, user_id):
             # apply spam filter
             if not spam_enabled:
                 filtered = sum(u.get("is_spam", False) for u in users)
@@ -189,7 +208,7 @@ async def send_lounge(
 
             total_filtered += filtered
             sent = await process_lounge_batch(
-                token, batch, message, chat_id, spam_enabled
+                token, batch, message, chat_id, spam_enabled, user_id
             )
             total_sent += sent
 
@@ -217,7 +236,8 @@ async def send_lounge_all_tokens(
     status_message: types.Message,
     bot,
     chat_id: int,
-    spam_enabled: bool
+    spam_enabled: bool,
+    user_id: int = None
 ) -> None:
     """
     Process lounge messaging for all tokens.
@@ -239,11 +259,18 @@ async def send_lounge_all_tokens(
         successful_ids = []
         batch_count = 0
 
-        async with aiohttp.ClientSession(headers={**HEADERS, 'meeff-access-token': token}) as session:
+        # Get device info for this token
+        device_info = get_or_create_device_info_for_token(user_id, token) if user_id else None
+        session_headers = BASE_HEADERS.copy()
+        session_headers['meeff-access-token'] = token
+        if device_info:
+            session_headers = get_headers_with_device_info(session_headers, device_info)
+        
+        async with aiohttp.ClientSession(headers=session_headers) as session:
             while True:
                 batch_count += 1
                 try:
-                    users = await fetch_lounge_users(token)
+                    users = await fetch_lounge_users(token, user_id)
                     if not users:
                         if batch_count == 1:
                             status_entry['status'] = "No users"
