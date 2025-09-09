@@ -148,8 +148,7 @@ async def send_message_to_everyone_all_tokens(
     chat_id: int = None,
     spam_enabled: bool = True,
     token_names: Dict[str, str] = None,
-    use_in_memory_deduplication: bool = False,
-    user_id: int = None
+    use_in_memory_deduplication: bool = False
 ) -> None:
     """
     Send messages to everyone for multiple tokens concurrently.
@@ -161,30 +160,29 @@ async def send_message_to_everyone_all_tokens(
     sent_ids = set() if use_in_memory_deduplication else None
     sent_ids_lock = asyncio.Lock() if use_in_memory_deduplication else None
 
+    async def _worker(token: str, idx: int):
+        display_name = token_names.get(token, token[:6]) if token_names else token[:6]
+        # Use the token as the key for tracking
+        token_status[token] = (display_name, 0, 0, 0, "Processing")
 
-async def _worker(token: str, idx: int):
-    display_name = token_names.get(token, token[:6]) if token_names else token[:6]
-    # Use the token as the key for tracking
-    token_status[token] = (display_name, 0, 0, 0, "Processing")
-
-    try:
-        # The function call is now corrected to only pass valid arguments
-        rooms, sent, filtered = await send_message_to_everyone(
-            token,
-            message,
-            chat_id=chat_id,
-            spam_enabled=spam_enabled,
-            user_id=user_id,
-            sent_ids=sent_ids,
-            sent_ids_lock=sent_ids_lock
-        )
-        logging.info(f"[{display_name} - {idx}/{len(tokens)}] Rooms: {rooms}, Sent: {sent}, Filtered: {filtered}")
-        token_status[token] = (display_name, rooms, sent, filtered, "Done")
-        return True
-    except Exception as e:
-        logging.error(f"[{display_name} - {idx}/{len(tokens)}] failed: {str(e)}")
-        token_status[token] = (display_name, 0, 0, 0, f"Failed: {str(e)[:20]}...")
-        return False
+        try:
+            rooms, sent, filtered = await send_message_to_everyone(
+                token,
+                message,
+                status_message=None,
+                bot=None,
+                chat_id=chat_id,
+                spam_enabled=spam_enabled,
+                sent_ids=sent_ids,
+                sent_ids_lock=sent_ids_lock
+            )
+            logging.info(f"[{display_name} - {idx}/{len(tokens)}] Rooms: {rooms}, Sent: {sent}, Filtered: {filtered}")
+            token_status[token] = (display_name, rooms, sent, filtered, "Done")
+            return True
+        except Exception as e:
+            logging.error(f"[{display_name} - {idx}/{len(tokens)}] failed: {str(e)}")
+            token_status[token] = (display_name, 0, 0, 0, f"Failed: {str(e)[:20]}...")
+            return False
 
     async def _refresh_ui():
         last_message = ""
