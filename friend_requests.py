@@ -9,6 +9,7 @@ from filters import apply_filter_for_account, is_request_filter_enabled
 from collections import defaultdict
 import time
 from dateutil import parser
+from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -38,11 +39,18 @@ stop_markup = InlineKeyboardMarkup(inline_keyboard=[
 async def fetch_users(session, token):
     """Fetch users from the API for friend requests"""
     url = "https://api.meeff.com/user/explore/v2?lng=-112.0613784790039&unreachableUserIds=&lat=33.437198638916016&locale=en"
-    headers = {
-    'User-Agent': "okhttp/4.12.0",
-    'X-Device-Info': "iPhone15Pro-iOS17.5.1-6.6.2",
-    'meeff-access-token': token
-}
+    
+    # This function needs user_id to get device info, but it's not passed
+    # We'll use a generic device info for now, but ideally should be refactored
+    from device_info import generate_device_info
+    device_info = generate_device_info()
+    
+    base_headers = {
+        'User-Agent': "okhttp/4.12.0",
+        'meeff-access-token': token
+    }
+    headers = get_headers_with_device_info(base_headers, device_info)
+    
     try:
         async with session.get(url, headers=headers) as response:
             if response.status == 429:
@@ -155,7 +163,12 @@ async def process_users(session, users, token, user_id, bot, target_channel_id, 
 
         # Send friend request
         url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user_id_to_check}&isOkay=1"
-        headers = {"meeff-access-token": token, "Connection": "keep-alive"}
+        
+        # Use generic device info since we don't have user_id context here
+        from device_info import generate_device_info
+        device_info = generate_device_info()
+        base_headers = {"meeff-access-token": token, "Connection": "keep-alive"}
+        headers = get_headers_with_device_info(base_headers, device_info)
 
         try:
             async with session.get(url, headers=headers) as response:
