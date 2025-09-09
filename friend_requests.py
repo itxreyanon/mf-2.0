@@ -311,7 +311,6 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
         except Exception as e:
             logging.error(f"Failed to pin message: {e}")
 
-    # Use the unique token as the key, and store a dictionary of data as the value
     token_status = {}
     
     session_sent_ids = get_already_sent_ids(user_id, "request")
@@ -320,9 +319,10 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
     async def _worker(token_obj, idx, shared_sent_ids, shared_lock):
         token = token_obj["token"]
         name = token_obj.get("name", f"Account {idx}")
-        
-        # Access this worker's status via its unique token
         worker_status = token_status[token]
+        
+        # Set status to processing once the worker actually starts
+        worker_status['status'] = "Processing"
         
         empty_batches = 0
 
@@ -382,8 +382,8 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
     async def _refresh_ui():
         last_message = ""
         update_count = 0
-        update_interval = 1  # Update every 1 second
-        force_update_interval = 3  # Force update every 3 iterations
+        update_interval = 1
+        force_update_interval = 3
 
         while state["running"]:
             try:
@@ -392,11 +392,10 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
                 
                 lines = [
                     header,
-                    "",  # Empty line after header
+                    "",
                     "<pre>Account    │Added │Filter│Status      </pre>"
                 ]
 
-                # Iterate through the dictionary getting the data for each token
                 for token, data in token_status.items():
                     name = data['name']
                     added = data['added']
@@ -433,21 +432,37 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
 
             await asyncio.sleep(update_interval)
 
-
-    # Initialize status for each token before starting the UI
+    # Initialize all statuses to 'Queued'
     for idx, token_obj in enumerate(tokens, 1):
         token = token_obj["token"]
         name = token_obj.get("name", f"Account {idx}")
         token_status[token] = {'name': name, 'added': 0, 'filtered': 0, 'status': 'Queued'}
 
-    # Start UI updater and workers
+    # Start the UI updater task so it can show the staggered start
     ui_task = asyncio.create_task(_refresh_ui())
-    worker_tasks = [asyncio.create_task(_worker(token_obj, idx, session_sent_ids, lock)) for idx, token_obj in enumerate(tokens, 1)]
+    await asyncio.sleep(0.1) # Give UI a moment to post the initial message
+
+    # --- NEW: Staggered start for each worker task ---
+    worker_tasks = []
+    for idx, token_obj in enumerate(tokens, 1):
+        # Update the status to 'Starting...' so the user sees the change in the UI
+        token_status[token_obj['token']]['status'] = 'Starting...'
+        await asyncio.sleep(0.5) # Allow the UI a moment to update
+
+        # Create the task for the current token
+        task = asyncio.create_task(_worker(token_obj, idx, session_sent_ids, lock))
+        worker_tasks.append(task)
+        
+        # If this is not the last token, wait before starting the next one
+        if idx < len(tokens):
+            await asyncio.sleep(3) # The 3-second delay between starts
+
+    # Wait for all the started tasks to complete
     results = await asyncio.gather(*worker_tasks, return_exceptions=True)
 
     # Clean up after tasks are done
     state["running"] = False
-    await asyncio.sleep(1.1) # Give UI one last update cycle
+    await asyncio.sleep(1.1)
     ui_task.cancel()
     try:
         await ui_task
