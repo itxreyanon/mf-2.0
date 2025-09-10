@@ -1,7 +1,6 @@
 import asyncio
 import aiohttp
 import logging
-from contextlib import asynccontextmanager
 import html
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -22,24 +21,6 @@ PER_BATCH_DELAY = 1.5     # Reduced from 2 to 1 second
 EMPTY_BATCH_DELAY = 2     # Delay after empty batch
 PER_ERROR_DELAY = 5       # Delay after errors
 
-# Connection pool for better performance
-_session_pool = None
-
-@asynccontextmanager
-async def get_session():
-    """Get a shared session with connection pooling."""
-    global _session_pool
-    if _session_pool is None or _session_pool.closed:
-        connector = aiohttp.TCPConnector(
-            limit=100,
-            limit_per_host=20,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            keepalive_timeout=30
-        )
-        _session_pool = aiohttp.ClientSession(connector=connector)
-    
-    yield _session_pool
 
 # Global state variables for friend requests
 user_states = defaultdict(lambda: {
@@ -243,7 +224,7 @@ async def run_requests(user_id, bot, target_channel_id):
     state["batch_index"] = 0
     state["running"] = True
     
-    async with get_session() as session:
+    async with aiohttp.ClientSession() as session:
         while state["running"]:
             try:
                 token = get_current_account(user_id)
@@ -346,7 +327,7 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
         empty_batches = 0
 
         try:
-            async with get_session() as session:
+            async with aiohttp.ClientSession() as session:
                 while state["running"]:
                     try:
                         if is_request_filter_enabled(user_id):
