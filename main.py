@@ -1062,14 +1062,11 @@ async def main() -> None:
         dp.include_router(router)
         logger.info("Starting bot polling...")
         await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        raise
     finally:
         # Cleanup resources
         if HTTP_SESSION_POOL and not HTTP_SESSION_POOL.closed:
             await HTTP_SESSION_POOL.close()
         THREAD_POOL.shutdown(wait=True)
-    except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        raise
-
-if __name__ == "__main__":
-    asyncio.run(main())
