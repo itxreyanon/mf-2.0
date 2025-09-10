@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import weakref
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import aiohttp
@@ -39,41 +37,6 @@ TARGET_CHANNEL_ID = -1002610862940
 # Global state
 password_access: Dict[int, datetime] = {}
 db_operation_states: Dict[int, Dict[str, str]] = defaultdict(dict)
-
-# Performance optimizations
-MAX_CONCURRENT_OPERATIONS = 50
-DB_CONNECTION_POOL_SIZE = 20
-HTTP_SESSION_POOL = None
-THREAD_POOL = ThreadPoolExecutor(max_workers=10)
-
-# User isolation - use WeakValueDictionary to prevent memory leaks
-user_sessions: Dict[int, weakref.WeakSet] = defaultdict(lambda: weakref.WeakSet())
-user_locks: Dict[int, asyncio.Lock] = {}
-
-def get_user_lock(user_id: int) -> asyncio.Lock:
-    """Get or create a lock for a specific user to prevent race conditions."""
-    if user_id not in user_locks:
-        user_locks[user_id] = asyncio.Lock()
-    return user_locks[user_id]
-
-async def get_http_session() -> aiohttp.ClientSession:
-    """Get a shared HTTP session with connection pooling."""
-    global HTTP_SESSION_POOL
-    if HTTP_SESSION_POOL is None or HTTP_SESSION_POOL.closed:
-        connector = aiohttp.TCPConnector(
-            limit=100,
-            limit_per_host=30,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            keepalive_timeout=30,
-            enable_cleanup_closed=True
-        )
-        timeout = aiohttp.ClientTimeout(total=30, connect=10)
-        HTTP_SESSION_POOL = aiohttp.ClientSession(
-            connector=connector,
-            timeout=timeout
-        )
-    return HTTP_SESSION_POOL
 
 # Logging configuration
 logging.basicConfig(
@@ -501,14 +464,6 @@ async def add_person_command(message: Message) -> None:
 @router.message()
 async def handle_new_token(message: Message) -> None:
     """Handle incoming messages for token addition or database operations."""
-    user_id = message.from_user.id
-    
-    # Use user-specific lock to prevent race conditions
-    async with get_user_lock(user_id):
-        await _handle_new_token_internal(message)
-
-async def _handle_new_token_internal(message: Message) -> None:
-    """Internal token handling with user isolation."""
     if message.text and message.text.startswith("/"):
         return
     user_id = message.from_user.id
@@ -555,38 +510,7 @@ async def _handle_new_token_internal(message: Message) -> None:
             await message.reply("Invalid token format.")
             return
 
-        # Verify token asynchronously without blocking other users
         verification_msg = await message.reply("<b>Verifying Token</b>...", parse_mode="HTML")
-        
-        # Run token verification in background
-        is_valid = await asyncio.create_task(_verify_token_async(token, user_id))
-        
-        if not is_valid:
-            await verification_msg.edit_text("<b>Invalid Token</b>.", parse_mode="HTML")
-            return
-
-        account_name = token_data[1] if len(token_data) > 1 else f"Account {len(get_tokens(user_id)) + 1}"
-        
-        # Run database operation in thread pool to avoid blocking
-        await asyncio.get_event_loop().run_in_executor(
-            THREAD_POOL, 
-            set_token, 
-            user_id, 
-            token, 
-            account_name
-        )
-        
-        await verification_msg.edit_text(
-            f"<b>Token Verified</b> and saved as '<code>{html.escape(account_name)}</code>'.",
-            parse_mode="HTML"
-        )
-    else:
-        await message.reply("Please provide a token.")
-
-async def _verify_token_async(token: str, user_id: int) -> bool:
-    """Verify token asynchronously with connection pooling."""
-    try:
-        session = await get_http_session()
         url = "https://api.meeff.com/facetalk/vibemeet/history/count/v1"
         params = {'locale': "en"}
         
@@ -595,26 +519,37 @@ async def _verify_token_async(token: str, user_id: int) -> bool:
         base_headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'meeff-access-token': token}
         headers = get_headers_with_device_info(base_headers, device_info)
 
-        async with session.get(url, params=params, headers=headers) as resp:
-            result = await resp.json(content_type=None)
-            return result.get("errorCode") != "AuthRequired"
-    except Exception as e:
-        logger.error(f"Error verifying token: {e}")
-        return False
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, params=params, headers=headers) as resp:
+                    result = await resp.json(content_type=None)
+                    if result.get("errorCode") == "AuthRequired":
+                        await verification_msg.edit_text("<b>Invalid Token</b>.", parse_mode="HTML")
+                        return
+            except Exception as e:
+                logger.error(f"Error verifying token: {e}")
+                await verification_msg.edit_text("<b>Verification Error</b>.", parse_mode="HTML")
+                return
+
+        account_name = token_data[1] if len(token_data) > 1 else f"Account {len(get_tokens(user_id)) + 1}"
+        set_token(user_id, token, account_name)
+        
+        # Store device info for this token (already created above)
+        await verification_msg.edit_text(
+            f"<b>Token Verified</b> and saved as '<code>{html.escape(account_name)}</code>'.",
+            parse_mode="HTML"
+        )
+    else:
+        await message.reply("Please provide a token.")
 
 async def show_manage_accounts_menu(callback_query: CallbackQuery) -> None:
     """Display the manage accounts menu."""
     user_id = callback_query.from_user.id
-    
-    # Use user lock and run DB operations in thread pool
-    async with get_user_lock(user_id):
-        # Run database operations in thread pool to avoid blocking
-        tokens, current_token = await asyncio.gather(
-            asyncio.get_event_loop().run_in_executor(THREAD_POOL, get_tokens, user_id),
-            asyncio.get_event_loop().run_in_executor(THREAD_POOL, get_current_account, user_id)
-        )
+    tokens = get_tokens(user_id)
+    current_token = get_current_account(user_id)
 
     if not tokens:
+        # This part is fine, as it's a different message content
         await callback_query.message.edit_text(
             "<b>No Accounts Found</b>\n\nSend a token to add an account.",
             reply_markup=back_markup,
@@ -661,16 +596,7 @@ async def callback_handler(callback_query: CallbackQuery) -> None:
     """Handle callback queries from inline keyboards."""
     user_id = callback_query.from_user.id
     data = callback_query.data
-    
-    # Use user-specific lock for callback handling
-    async with get_user_lock(user_id):
-        await _callback_handler_internal(callback_query)
 
-async def _callback_handler_internal(callback_query: CallbackQuery) -> None:
-    """Internal callback handler with user isolation."""
-    user_id = callback_query.from_user.id
-    data = callback_query.data
-    
     if await signup_callback_handler(callback_query):
         return
 
@@ -681,12 +607,7 @@ async def _callback_handler_internal(callback_query: CallbackQuery) -> None:
     state = user_states.setdefault(user_id, {})
 
     if data == "db_settings":
-        # Run DB operation in thread pool
-        current_info = await asyncio.get_event_loop().run_in_executor(
-            THREAD_POOL, 
-            get_current_collection_info, 
-            user_id
-        )
+        current_info = get_current_collection_info(user_id)
         info_text = "<b>Database Settings</b>\n\n"
         if current_info["exists"]:
             summary = current_info["summary"]
@@ -714,11 +635,7 @@ async def _callback_handler_internal(callback_query: CallbackQuery) -> None:
             parse_mode="HTML"
         )
     elif data == "db_view":
-        # Run DB operation in thread pool
-        collections = await asyncio.get_event_loop().run_in_executor(
-            THREAD_POOL, 
-            list_all_collections
-        )
+        collections = list_all_collections()
         if not collections:
             await callback_query.message.edit_text(
                 "<b>No Collections Found.</b>",
@@ -821,12 +738,7 @@ async def _callback_handler_internal(callback_query: CallbackQuery) -> None:
         await show_manage_accounts_menu(callback_query)
     elif data.startswith("view_account_"):
         idx = int(data.split("_")[-1])
-        # Run DB operation in thread pool
-        tokens = await asyncio.get_event_loop().run_in_executor(
-            THREAD_POOL, 
-            get_tokens, 
-            user_id
-        )
+        tokens = get_tokens(user_id)
         if 0 <= idx < len(tokens):
             token, token_obj = tokens[idx]["token"], tokens[idx]
             info_card = get_info_card(user_id, token)
@@ -859,12 +771,7 @@ async def _callback_handler_internal(callback_query: CallbackQuery) -> None:
             await callback_query.answer("Invalid account selected.")
     elif data.startswith("confirm_delete_"):
         idx = int(data.split("_")[-1])
-        # Run DB operation in thread pool
-        tokens = await asyncio.get_event_loop().run_in_executor(
-            THREAD_POOL, 
-            get_tokens, 
-            user_id
-        )
+        tokens = get_tokens(user_id)
         if 0 <= idx < len(tokens):
             name = tokens[idx]["name"]
             buttons = [
@@ -882,20 +789,9 @@ async def _callback_handler_internal(callback_query: CallbackQuery) -> None:
             await callback_query.answer("Invalid account selected.")
     elif data.startswith("toggle_status_"):
         idx = int(data.split("_")[-1])
-        # Run DB operation in thread pool
-        tokens = await asyncio.get_event_loop().run_in_executor(
-            THREAD_POOL, 
-            get_tokens, 
-            user_id
-        )
+        tokens = get_tokens(user_id)
         if 0 <= idx < len(tokens):
-            # Run DB operation in thread pool
-            await asyncio.get_event_loop().run_in_executor(
-                THREAD_POOL, 
-                toggle_token_status, 
-                user_id, 
-                tokens[idx]["token"]
-            )
+            toggle_token_status(user_id, tokens[idx]["token"])
             await callback_query.answer(f"Toggled status for {html.escape(tokens[idx]['name'])}")
             await show_manage_accounts_menu(callback_query)
         else:
@@ -922,41 +818,19 @@ async def _callback_handler_internal(callback_query: CallbackQuery) -> None:
         await callback_handler(new_callback_query)
     elif data.startswith("set_account_"):
         idx = int(data.split("_")[-1])
-        # Run DB operation in thread pool
-        tokens = await asyncio.get_event_loop().run_in_executor(
-            THREAD_POOL, 
-            get_tokens, 
-            user_id
-        )
+        tokens = get_tokens(user_id)
         if 0 <= idx < len(tokens):
-            # Run DB operation in thread pool
-            await asyncio.get_event_loop().run_in_executor(
-                THREAD_POOL, 
-                set_current_account, 
-                user_id, 
-                tokens[idx]["token"]
-            )
+            set_current_account(user_id, tokens[idx]["token"])
             await callback_query.answer(f"Set {html.escape(tokens[idx]['name'])} as current account")
             await show_manage_accounts_menu(callback_query)
         else:
             await callback_query.answer("Invalid account selected.")
     elif data.startswith("delete_account_"):
         idx = int(data.split("_")[-1])
-        # Run DB operation in thread pool
-        tokens = await asyncio.get_event_loop().run_in_executor(
-            THREAD_POOL, 
-            get_tokens, 
-            user_id
-        )
+        tokens = get_tokens(user_id)
         if 0 <= idx < len(tokens):
             name = tokens[idx]["name"]
-            # Run DB operation in thread pool
-            await asyncio.get_event_loop().run_in_executor(
-                THREAD_POOL, 
-                delete_token, 
-                user_id, 
-                tokens[idx]["token"]
-            )
+            delete_token(user_id, tokens[idx]["token"])
             await callback_query.message.edit_text(
                 f"<b>Account Deleted:</b> <code>{html.escape(name)}</code>",
                 reply_markup=back_markup,
@@ -988,12 +862,7 @@ async def _callback_handler_internal(callback_query: CallbackQuery) -> None:
         if state.get("running"):
             await callback_query.answer("Another request is already running!")
             return
-        # Run DB operation in thread pool
-        tokens = await asyncio.get_event_loop().run_in_executor(
-            THREAD_POOL, 
-            get_active_tokens, 
-            user_id
-        )
+        tokens = get_active_tokens(user_id)
         if not tokens:
             await callback_query.answer("No active tokens found.", show_alert=True)
             return
@@ -1051,30 +920,17 @@ async def set_bot_commands() -> None:
         BotCommand(command="password", description="Enter password for access")
     ]
     await bot.set_my_commands(commands)
+
 async def main() -> None:
     """Main function to start the bot."""
-    print("DEBUG: Inside main() function.") # <--- ADD THIS
     try:
-        # Initialize HTTP session pool
-        await get_http_session()
-        
         await set_bot_commands()
         dp.include_router(router)
         logger.info("Starting bot polling...")
-        print("DEBUG: About to start polling...") # <--- ADD THIS
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
-        # Add a print here too, in case logging isn't working
-        print(f"ERROR: Failed to start bot: {e}") 
         raise
-    finally:
-        # Cleanup resources
-        if HTTP_SESSION_POOL and not HTTP_SESSION_POOL.closed:
-            await HTTP_SESSION_POOL.close()
-        THREAD_POOL.shutdown(wait=True)
-        print("DEBUG: Cleanup in finally block executed.") # <--- ADD THIS
 
 if __name__ == "__main__":
-    print("DEBUG: Running from __main__ entry point.") # <--- ADD THIS
     asyncio.run(main())
