@@ -1,10 +1,8 @@
 import aiohttp
 import asyncio
 import logging
-from datetime import datetime
-from db import is_already_sent, add_sent_id, bulk_add_sent_ids
-from typing import List, Dict, Tuple
-from aiogram import types
+from db import is_already_sent, bulk_add_sent_ids
+from typing import List, Dict
 from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
 
 CHATROOM_URL = "https://api.meeff.com/chatroom/dashboard/v1"
@@ -23,7 +21,6 @@ async def fetch_chatrooms(session, token, from_date=None, user_id=None):
     headers = BASE_HEADERS.copy()
     headers['meeff-access-token'] = token
     
-    # Get device info for this token if user_id is provided
     if user_id:
         device_info = get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
@@ -43,7 +40,6 @@ async def fetch_more_chatrooms(session, token, from_date, user_id=None):
     headers = BASE_HEADERS.copy()
     headers['meeff-access-token'] = token
     
-    # Get device info for this token if user_id is provided
     if user_id:
         device_info = get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
@@ -64,7 +60,6 @@ async def send_message(session, token, chatroom_id, message, user_id=None):
     headers = BASE_HEADERS.copy()
     headers['meeff-access-token'] = token
     
-    # Get device info for this token if user_id is provided
     if user_id:
         device_info = get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
@@ -84,27 +79,34 @@ async def process_chatroom_batch(session, token, chatrooms, message, chat_id, sp
     sent_count = 0
     filtered_count = 0
     filtered_rooms = []
+    
     if spam_enabled:
-        room_ids = [room.get('_id') for room in chatrooms]
+        room_ids = [room.get('_id') for room in chatrooms if room.get('_id')]
         if sent_ids is not None:
             async with sent_ids_lock:
+                # In-memory check
                 filtered_rooms = [room for room in chatrooms if room.get('_id') not in sent_ids]
             filtered_count = len(chatrooms) - len(filtered_rooms)
         else:
+            # DB check
             existing_ids = await is_already_sent(chat_id, "chatroom", room_ids, bulk=True)
             filtered_rooms = [room for room in chatrooms if room.get('_id') not in existing_ids]
             filtered_count = len(chatrooms) - len(filtered_rooms)
     else:
         filtered_rooms = chatrooms
+        
     tasks = [send_message(session, token, room.get('_id'), message, user_id) for room in filtered_rooms]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    sent_count = sum(1 for result in results if result is not None)
+    sent_count = sum(1 for result in results if result is not None and not isinstance(result, Exception))
+    
     if spam_enabled and filtered_rooms:
-        sent_ids_batch = [room.get('_id') for room in filtered_rooms]
-        await bulk_add_sent_ids(chat_id, "chatroom", sent_ids_batch)
-        if sent_ids is not None:
-            async with sent_ids_lock:
-                sent_ids.update(sent_ids_batch)
+        sent_ids_batch = [room.get('_id') for room, result in zip(filtered_rooms, results) if result is not None and not isinstance(result, Exception)]
+        if sent_ids_batch:
+            await bulk_add_sent_ids(chat_id, "chatroom", sent_ids_batch)
+            if sent_ids is not None:
+                async with sent_ids_lock:
+                    sent_ids.update(sent_ids_batch)
+
     return len(chatrooms), sent_count, filtered_count
 
 async def send_message_to_everyone(
@@ -140,36 +142,29 @@ async def send_message_to_everyone(
             from_date = next_from
     return total_chatrooms, sent_count, filtered_count
 
-# CORRECTED AND REFACTORED CODE
-
 async def send_message_to_everyone_all_tokens(
     tokens: List[str],
     message: str,
-    status_message: 'types.Message' = None,
-    bot=None,
-    chat_id: int = None,
-    spam_enabled: bool = True,
-    token_names: Dict[str, str] = None,
-    use_in_memory_deduplication: bool = False,
-    user_id: int = None
+    status_message,
+    bot,
+    chat_id: int,
+    spam_enabled: bool,
+    token_names: Dict[str, str],
+    use_in_memory_deduplication: bool,
+    user_id: int
 ) -> None:
-    """
-    Send messages to everyone for multiple tokens concurrently.
-    Correctly handles and displays accounts that have the same name.
-    """
     token_status = {}
     sent_ids = set() if use_in_memory_deduplication and spam_enabled else None
     sent_ids_lock = asyncio.Lock() if sent_ids is not None else None
     
-    # --- CHANGE: Added a reliable flag to control the UI loop ---
     running = True
 
     async def _worker(token: str):
-        display_name = token_names.get(token, token[:6]) if token_names else token[:6]
+        display_name = token_names.get(token, token[:6])
         token_status[token] = {'name': display_name, 'rooms': 0, 'sent': 0, 'filtered': 0, 'status': "Processing"}
 
         try:
-            rooms, sent, filtered = await send_message_to_everyone(
+            await send_message_to_everyone(
                 token,
                 message,
                 chat_id=chat_id,
@@ -177,7 +172,7 @@ async def send_message_to_everyone_all_tokens(
                 user_id=user_id,
                 sent_ids=sent_ids,
                 sent_ids_lock=sent_ids_lock,
-                status_entry=token_status[token] # Pass the dictionary for live updates
+                status_entry=token_status[token]
             )
             token_status[token]['status'] = "Done"
             return True
@@ -188,7 +183,7 @@ async def send_message_to_everyone_all_tokens(
 
     async def _refresh_ui():
         last_message = ""
-        while running: # --- CHANGE: Loop condition is now simpler and more reliable ---
+        while running:
             lines = [
                 "🔄 <b>Chatroom AIO Status</b>\n",
                 "<pre>Account    │Rooms │Sent  │Filter│Status</pre>"
@@ -207,7 +202,7 @@ async def send_message_to_everyone_all_tokens(
                 )
             
             current_message = "\n".join(lines)
-            if current_message != last_message and bot and chat_id and status_message:
+            if current_message != last_message:
                 try:
                     await bot.edit_message_text(
                         chat_id=chat_id,
@@ -221,61 +216,53 @@ async def send_message_to_everyone_all_tokens(
                         logging.error(f"Error updating status: {e}")
             await asyncio.sleep(1)
 
-    # Initialize token status
     for token in tokens:
-        display_name = token_names.get(token, token[:6]) if token_names else token[:6]
+        display_name = token_names.get(token, token[:6])
         token_status[token] = {'name': display_name, 'rooms': 0, 'sent': 0, 'filtered': 0, 'status': "Queued"}
 
-    ui_task = asyncio.create_task(_refresh_ui()) if bot and chat_id and status_message else None
+    ui_task = asyncio.create_task(_refresh_ui())
     
     worker_tasks = [asyncio.create_task(_worker(token)) for token in tokens]
     results = await asyncio.gather(*worker_tasks, return_exceptions=True)
 
-    # --- CHANGE: Proper cleanup of the background UI task ---
     running = False
-    if ui_task:
-        await asyncio.sleep(1.1) # Allow one final UI update
-        ui_task.cancel()
-        try:
-            await ui_task
-        except asyncio.CancelledError:
-            pass # Task cancellation is expected
+    await asyncio.sleep(1.1)
+    ui_task.cancel()
+    try:
+        await ui_task
+    except asyncio.CancelledError:
+        pass
 
     successful_tokens = sum(1 for result in results if result is True)
     grand_rooms = sum(status.get('rooms', 0) for status in token_status.values())
     grand_sent = sum(status.get('sent', 0) for status in token_status.values())
     grand_filtered = sum(status.get('filtered', 0) for status in token_status.values())
-
-    logging.info(
-        f"[AllTokens] Finished: {successful_tokens}/{len(tokens)} tokens succeeded. "
-        f"Total Rooms={grand_rooms}, Total Sent={grand_sent}, Total Filtered={grand_filtered}"
-    )
-
-    if bot and chat_id and status_message:
-        success_rate = (successful_tokens / len(tokens)) * 100 if len(tokens) > 0 else 0
-        success_emoji = "✅" if success_rate > 90 else "⚠️" if success_rate > 70 else "❌"
-        lines = [
-            f"{success_emoji} <b>Chatroom AIO Completed</b> - {successful_tokens}/{len(tokens)} ({success_rate:.1f}%)\n",
-            "<pre>Account    │Rooms │Sent  │Filter│Status</pre>"
-        ]
-        for status in token_status.values():
-            name = status.get('name', 'N/A')
-            rooms = status.get('rooms', 0)
-            sent = status.get('sent', 0)
-            filtered = status.get('filtered', 0)
-            stat = status.get('status', 'Done')
-            
-            display_name = name[:10].ljust(10) if len(name) <= 10 else name[:9] + '…'
-            lines.append(
-                f"<pre>{display_name}│{rooms:>5} │{sent:>5} │{filtered:>6}│{stat}</pre>"
-            )
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_message.message_id,
-                text="\n".join(lines),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            if "message is not modified" not in str(e):
-                logging.error(f"Error in final status update: {e}")
+    
+    success_rate = (successful_tokens / len(tokens)) * 100 if len(tokens) > 0 else 0
+    success_emoji = "✅" if success_rate > 90 else "⚠️" if success_rate > 70 else "❌"
+    
+    final_lines = [
+        f"{success_emoji} <b>Chatroom AIO Completed</b> - {successful_tokens}/{len(tokens)} ({success_rate:.1f}%)\n",
+        "<pre>Account    │Rooms │Sent  │Filter│Status</pre>"
+    ]
+    for status in token_status.values():
+        name = status.get('name', 'N/A')
+        rooms = status.get('rooms', 0)
+        sent = status.get('sent', 0)
+        filtered = status.get('filtered', 0)
+        stat = status.get('status', 'Done')
+        
+        display_name = name[:10].ljust(10) if len(name) <= 10 else name[:9] + '…'
+        final_lines.append(
+            f"<pre>{display_name}│{rooms:>5} │{sent:>5} │{filtered:>6}│{stat}</pre>"
+        )
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_message.message_id,
+            text="\n".join(final_lines),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logging.error(f"Error in final status update: {e}")
