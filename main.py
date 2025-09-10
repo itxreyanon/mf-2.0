@@ -1051,9 +1051,9 @@ async def set_bot_commands() -> None:
         BotCommand(command="password", description="Enter password for access")
     ]
     await bot.set_my_commands(commands)
-
 async def main() -> None:
     """Main function to start the bot."""
+    print("DEBUG: Inside main() function.") # <--- ADD THIS
     try:
         # Initialize HTTP session pool
         await get_http_session()
@@ -1061,12 +1061,20 @@ async def main() -> None:
         await set_bot_commands()
         dp.include_router(router)
         logger.info("Starting bot polling...")
+        print("DEBUG: About to start polling...") # <--- ADD THIS
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
+        # Add a print here too, in case logging isn't working
+        print(f"ERROR: Failed to start bot: {e}") 
         raise
     finally:
         # Cleanup resources
         if HTTP_SESSION_POOL and not HTTP_SESSION_POOL.closed:
             await HTTP_SESSION_POOL.close()
         THREAD_POOL.shutdown(wait=True)
+        print("DEBUG: Cleanup in finally block executed.") # <--- ADD THIS
+
+if __name__ == "__main__":
+    print("DEBUG: Running from __main__ entry point.") # <--- ADD THIS
+    asyncio.run(main())
