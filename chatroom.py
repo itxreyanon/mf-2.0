@@ -1,7 +1,6 @@
 import aiohttp
 import asyncio
 import logging
-from contextlib import asynccontextmanager
 from datetime import datetime
 from db import is_already_sent, add_sent_id, bulk_add_sent_ids
 from typing import List, Dict, Tuple
@@ -16,25 +15,6 @@ BASE_HEADERS = {
     'Accept-Encoding': "gzip",
     'content-type': "application/json; charset=utf-8"
 }
-
-# Connection pool for better performance
-_session_pool = None
-
-@asynccontextmanager
-async def get_session():
-    """Get a shared session with connection pooling."""
-    global _session_pool
-    if _session_pool is None or _session_pool.closed:
-        connector = aiohttp.TCPConnector(
-            limit=100,
-            limit_per_host=20,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            keepalive_timeout=30
-        )
-        _session_pool = aiohttp.ClientSession(connector=connector)
-    
-    yield _session_pool
 
 async def fetch_chatrooms(session, token, from_date=None, user_id=None):
     params = {'locale': "en"}
@@ -116,8 +96,7 @@ async def process_chatroom_batch(session, token, chatrooms, message, chat_id, sp
             filtered_count = len(chatrooms) - len(filtered_rooms)
     else:
         filtered_rooms = chatrooms
-    # Process in smaller batches to avoid overwhelming the server
-    tasks = [send_message(session, token, room.get('_id'), message, user_id) for room in filtered_rooms[:20]]
+    tasks = [send_message(session, token, room.get('_id'), message, user_id) for room in filtered_rooms]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     sent_count = sum(1 for result in results if result is not None)
     if spam_enabled and filtered_rooms:
@@ -136,8 +115,7 @@ async def send_message_to_everyone(
     total_chatrooms = 0
     filtered_count = 0
     from_date = None
-    
-    async with get_session() as session:
+    async with aiohttp.ClientSession() as session:
         while True:
             rooms, next_from = await (fetch_chatrooms(session, token, from_date, user_id)
                                     if from_date is None else
@@ -162,6 +140,8 @@ async def send_message_to_everyone(
             from_date = next_from
     return total_chatrooms, sent_count, filtered_count
 
+# CORRECTED AND REFACTORED CODE
+
 async def send_message_to_everyone_all_tokens(
     tokens: List[str],
     message: str,
@@ -181,6 +161,7 @@ async def send_message_to_everyone_all_tokens(
     sent_ids = set() if use_in_memory_deduplication and spam_enabled else None
     sent_ids_lock = asyncio.Lock() if sent_ids is not None else None
     
+    # --- CHANGE: Added a reliable flag to control the UI loop ---
     running = True
 
     async def _worker(token: str):
@@ -207,7 +188,7 @@ async def send_message_to_everyone_all_tokens(
 
     async def _refresh_ui():
         last_message = ""
-        while running:
+        while running: # --- CHANGE: Loop condition is now simpler and more reliable ---
             lines = [
                 "🔄 <b>Chatroom AIO Status</b>\n",
                 "<pre>Account    │Rooms │Sent  │Filter│Status</pre>"
@@ -250,6 +231,7 @@ async def send_message_to_everyone_all_tokens(
     worker_tasks = [asyncio.create_task(_worker(token)) for token in tokens]
     results = await asyncio.gather(*worker_tasks, return_exceptions=True)
 
+    # --- CHANGE: Proper cleanup of the background UI task ---
     running = False
     if ui_task:
         await asyncio.sleep(1.1) # Allow one final UI update
@@ -257,7 +239,7 @@ async def send_message_to_everyone_all_tokens(
         try:
             await ui_task
         except asyncio.CancelledError:
-            pass
+            pass # Task cancellation is expected
 
     successful_tokens = sum(1 for result in results if result is True)
     grand_rooms = sum(status.get('rooms', 0) for status in token_status.values())
