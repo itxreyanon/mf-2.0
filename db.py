@@ -1,15 +1,38 @@
 from pymongo import MongoClient
+from pymongo.collection import Collection
+from pymongo.database import Database
+import threading
 import datetime
 
-# MongoDB connection
-client = MongoClient("mongodb+srv://irexanon:xUf7PCf9cvMHy8g6@rexdb.d9rwo.mongodb.net/?retryWrites=true&w=majority&appName=RexDB")
-db = client.meeff_bot
+# MongoDB connection with connection pooling
+client = MongoClient(
+    "mongodb+srv://irexanon:xUf7PCf9cvMHy8g6@rexdb.d9rwo.mongodb.net/?retryWrites=true&w=majority&appName=RexDB",
+    maxPoolSize=50,
+    minPoolSize=10,
+    maxIdleTimeMS=30000,
+    waitQueueTimeoutMS=5000,
+    serverSelectionTimeoutMS=5000,
+    socketTimeoutMS=20000,
+    connectTimeoutMS=20000,
+    retryWrites=True,
+    w='majority'
+)
+db: Database = client.meeff_bot
 
-# Helper function to get a user's collection
-def _get_user_collection(telegram_user_id):
+# Thread-local storage for database connections
+_thread_local = threading.local()
+
+def get_thread_safe_db():
+    """Get a thread-safe database connection."""
+    if not hasattr(_thread_local, 'db'):
+        _thread_local.db = client.meeff_bot
+    return _thread_local.db
+
+def _get_user_collection(telegram_user_id) -> Collection:
     """Get the collection for a user"""
+    thread_db = get_thread_safe_db()
     collection_name = f"user_{telegram_user_id}"
-    return db[collection_name]
+    return thread_db[collection_name]
 
 # Helper function to ensure collection exists with basic structure
 def _ensure_user_collection_exists(telegram_user_id):
@@ -30,7 +53,8 @@ def _ensure_user_collection_exists(telegram_user_id):
 # Enhanced DB Collection Management Functions
 def list_all_collections():
     """List all user collections with detailed data summary"""
-    collection_names = db.list_collection_names()
+    thread_db = get_thread_safe_db()
+    collection_names = thread_db.list_collection_names()
     user_collections = []
     
     for name in collection_names:
@@ -53,12 +77,15 @@ def list_all_collections():
 def get_collection_summary(collection_name):
     """Get a detailed summary of data in a collection using a single efficient query."""
     try:
-        collection = db[collection_name]
+        thread_db = get_thread_safe_db()
+        collection = thread_db[collection_name]
         
-        # --- THE FIX IS HERE ---
-        # Instead of 5 separate database calls, we fetch all documents in one trip.
+        # Optimized: fetch all documents in one trip with projection
         query_types = ["tokens", "sent_records", "info_cards", "settings", "metadata"]
-        all_docs = list(collection.find({"type": {"$in": query_types}}))
+        all_docs = list(collection.find(
+            {"type": {"$in": query_types}},
+            {"type": 1, "items": 1, "data": 1, "current_token": 1, "spam_filter": 1, "created_at": 1, "user_id": 1}
+        ))
         
         # Create a dictionary to easily access documents by their type
         docs_by_type = {doc.get("type"): doc for doc in all_docs}
@@ -97,6 +124,9 @@ def get_collection_summary(collection_name):
         # Get creation date
         created_at = metadata_doc.get("created_at") if metadata_doc else None
         
+        # Get total document count efficiently
+        total_documents = collection.estimated_document_count()
+        
         return {
             "tokens_count": tokens_count,
             "active_tokens": active_tokens,
@@ -106,7 +136,7 @@ def get_collection_summary(collection_name):
             "current_token_preview": current_token[:10] + "..." if current_token else None,
             "spam_filter_enabled": spam_filter,
             "created_at": created_at,
-            "total_documents": collection.count_documents({})
+            "total_documents": total_documents
         }
     except Exception as e:
         return {"error": str(e)}
@@ -114,14 +144,15 @@ def get_collection_summary(collection_name):
 def connect_to_collection(collection_name, target_user_id):
     """Connect to existing collection by transferring all data"""
     try:
+        thread_db = get_thread_safe_db()
         # Check if source collection exists
-        if collection_name not in db.list_collection_names():
+        if collection_name not in thread_db.list_collection_names():
             return False, f"Collection '{collection_name}' not found"
         
         # Ensure target collection exists
         _ensure_user_collection_exists(target_user_id)
         
-        from_collection = db[collection_name]
+        from_collection = thread_db[collection_name]
         to_collection = _get_user_collection(target_user_id)
         
         # Get all documents from source collection
@@ -151,10 +182,11 @@ def connect_to_collection(collection_name, target_user_id):
 def rename_user_collection(user_id, new_collection_name):
     """Rename a user's collection"""
     try:
+        thread_db = get_thread_safe_db()
         old_collection_name = f"user_{user_id}"
         
         # Check if old collection exists
-        if old_collection_name not in db.list_collection_names():
+        if old_collection_name not in thread_db.list_collection_names():
             return False, "Your collection not found"
         
         # Validate new collection name
@@ -162,18 +194,18 @@ def rename_user_collection(user_id, new_collection_name):
             new_collection_name = f"user_{new_collection_name}"
         
         # Check if new collection name already exists
-        if new_collection_name in db.list_collection_names():
+        if new_collection_name in thread_db.list_collection_names():
             return False, "Target collection name already exists"
         
         # Get all documents from old collection
-        old_collection = db[old_collection_name]
+        old_collection = thread_db[old_collection_name]
         all_docs = list(old_collection.find({}))
         
         if not all_docs:
             return False, "Your collection is empty"
         
         # Create new collection and insert documents
-        new_collection = db[new_collection_name]
+        new_collection = thread_db[new_collection_name]
         
         # Update metadata
         for doc in all_docs:
@@ -232,8 +264,9 @@ def transfer_to_user(from_user_id, to_user_id):
 
 def get_current_collection_info(user_id):
     """Get current user's collection information"""
+    thread_db = get_thread_safe_db()
     collection_name = f"user_{user_id}"
-    if collection_name in db.list_collection_names():
+    if collection_name in thread_db.list_collection_names():
         summary = get_collection_summary(collection_name)
         return {
             "collection_name": collection_name,

@@ -2,6 +2,7 @@ from db import bulk_add_sent_ids, is_already_sent
 import asyncio
 import aiohttp
 import logging
+from contextlib import asynccontextmanager
 from typing import List, Dict
 from aiogram import types
 from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
@@ -18,6 +19,25 @@ BASE_HEADERS = {
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Connection pool for better performance
+_session_pool = None
+
+@asynccontextmanager
+async def get_session():
+    """Get a shared session with connection pooling."""
+    global _session_pool
+    if _session_pool is None or _session_pool.closed:
+        connector = aiohttp.TCPConnector(
+            limit=100,
+            limit_per_host=20,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            keepalive_timeout=30
+        )
+        _session_pool = aiohttp.ClientSession(connector=connector)
+    
+    yield _session_pool
+
 async def fetch_lounge_users(token: str, user_id: int = None) -> List[Dict]:
     """Fetch users from lounge with improved error handling"""
     headers = BASE_HEADERS.copy()
@@ -28,7 +48,7 @@ async def fetch_lounge_users(token: str, user_id: int = None) -> List[Dict]:
         device_info = get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
         try:
             async with session.get(
                 LOUNGE_URL, 
@@ -57,7 +77,7 @@ async def open_chatroom(token: str, target_user_id: str, telegram_user_id: int =
     
     payload = {"waitingRoomId": target_user_id, "locale": "en"}
     
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
         try:
             async with session.post(
                 CHATROOM_URL,
@@ -93,7 +113,7 @@ async def send_lounge_message(token: str, chatroom_id: str, message: str, user_i
         "locale": "en"
     }
     
-    async with aiohttp.ClientSession() as session:
+    async with get_session() as session:
         try:
             async with session.post(
                 SEND_MESSAGE_URL,
@@ -266,7 +286,7 @@ async def send_lounge_all_tokens(
         if device_info:
             session_headers = get_headers_with_device_info(session_headers, device_info)
         
-        async with aiohttp.ClientSession(headers=session_headers) as session:
+        async with get_session() as session:
             while True:
                 batch_count += 1
                 try:

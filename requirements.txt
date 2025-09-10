@@ -3,3 +3,5 @@ aiohttp
 requests
 pymongo
 python-dateutil
+asyncio-throttle
+cachetools
