@@ -11,6 +11,7 @@ from collections import defaultdict
 from aiogram.exceptions import TelegramBadRequest
 # Import custom modules
 from db import (
+    check_db_health,  # <-- Add this line
     set_token, get_tokens, set_current_account, get_current_account, delete_token,
     set_user_filters, get_user_filters, set_spam_filter, get_spam_filter,
     is_already_sent, add_sent_id, toggle_token_status, get_active_tokens,
