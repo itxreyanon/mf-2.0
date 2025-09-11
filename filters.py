@@ -1,434 +1,229 @@
-from aiogram import types
-import requests
-import json
-from db import get_current_account, get_user_filters, set_user_filters, get_tokens, get_active_tokens
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import asyncio
 import aiohttp
+from aiogram import types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# Import the now ASYNC db functions
+from db import get_user_filters, set_user_filters, get_tokens
 from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
 
-# Global state for filter settings
+# Global state for filter settings (remains synchronous as it's in-memory)
 user_filter_states = {}
-async def get_meeff_filter_main_keyboard(user_id):
-    """Main Meeff Filter menu with an efficient, horizontal account layout."""
+
+async def get_meeff_filter_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Main Meeff Filter menu. Now async to fetch tokens."""
+    # ASYNC CHANGE: Await the database call
     tokens = await get_tokens(user_id)
     
-    # Get current filter status
     filter_enabled = user_filter_states.get(user_id, {}).get('request_filter_enabled', True)
-    filter_status = " Enabled" if filter_enabled else " Disabled"
+    filter_status = "✅ Enabled" if filter_enabled else "❌ Disabled"
     
-    keyboard = []
-    
-    # Filter toggle button at the top
-    keyboard.append([
-        InlineKeyboardButton(
-            text=f" Request Filter: {filter_status}", 
-            callback_data="toggle_request_filter"
-        )
-    ])
+    keyboard = [[InlineKeyboardButton(text=f"Request Filter: {filter_status}", callback_data="toggle_request_filter")]]
     
     ACCOUNTS_PER_ROW = 2
     row = []
     for i, token_data in enumerate(tokens):
         account_name = token_data.get('name', f'Account {i+1}')
-        is_active = token_data.get('active', True)
-        status_emoji = "✅" if is_active else "❌"
-        
-        # --- THE FIX IS HERE ---
-        # Get filters directly from the token data we already have.
-        # This avoids making a new database call for every account.
+        # OPTIMIZATION: Filters are already part of the token data from the DB
         filters = token_data.get('filters', {})
         nationality = filters.get('filterNationalityCode', '')
-        nationality_display = f"({nationality})" if nationality else ""
-
-        # Create the button and add it to the current row
-        row.append(
-            InlineKeyboardButton(
-                text=f"{account_name} {nationality_display}",
-                callback_data=f"account_filter_{i}"
-            )
-        )
+        display_text = f"{account_name} ({nationality})" if nationality else account_name
         
-        # When the row is full, add it to the keyboard
+        row.append(InlineKeyboardButton(text=display_text, callback_data=f"account_filter_{i}"))
+        
         if len(row) == ACCOUNTS_PER_ROW:
             keyboard.append(row)
             row = []
 
-    # Add the last row if it's not full
     if row:
         keyboard.append(row)
     
-    # Back button at the bottom
-    keyboard.append([
-        InlineKeyboardButton(text=" Back", callback_data="settings_menu")
-    ])
-    
+    keyboard.append([InlineKeyboardButton(text="⬅️ Back", callback_data="settings_menu")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
-def get_account_filter_keyboard(account_index):
-    """Filter options for specific account"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [  # FIX: Placed filter options on a single horizontal row
-            InlineKeyboardButton(text="Gender", callback_data=f"account_filter_gender_{account_index}"),
-            InlineKeyboardButton(text="Age", callback_data=f"account_filter_age_{account_index}"),
-            InlineKeyboardButton(text="Nationality", callback_data=f"account_filter_nationality_{account_index}")
-        ],
-        [  # Back button on its own row
-            InlineKeyboardButton(text=" Back to Accounts", callback_data="meeff_filter_main")
-        ]
-    ])
-    return keyboard
 
-def get_gender_keyboard(account_index):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="All Gender", callback_data=f"account_gender_all_{account_index}")],
+def get_account_filter_keyboard(account_index: int) -> InlineKeyboardMarkup:
+    """Filter options for a specific account."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🚻 Gender", callback_data=f"account_filter_gender_{account_index}"),
+            InlineKeyboardButton(text="🎂 Age", callback_data=f"account_filter_age_{account_index}"),
+            InlineKeyboardButton(text="🌍 Nationality", callback_data=f"account_filter_nationality_{account_index}")
+        ],
+        [InlineKeyboardButton(text="⬅️ Back to Accounts", callback_data="meeff_filter_main")]
+    ])
+
+def get_gender_keyboard(account_index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="All", callback_data=f"account_gender_all_{account_index}")],
         [InlineKeyboardButton(text="Male", callback_data=f"account_gender_male_{account_index}")],
         [InlineKeyboardButton(text="Female", callback_data=f"account_gender_female_{account_index}")],
-        [InlineKeyboardButton(text=" Back", callback_data=f"account_filter_back_{account_index}")]
+        [InlineKeyboardButton(text="⬅️ Back", callback_data=f"account_filter_back_{account_index}")]
     ])
-    return keyboard
 
-def get_age_keyboard(account_index):
+def get_age_keyboard(account_index: int) -> InlineKeyboardMarkup:
     keyboard = []
-    # Create age buttons in rows of 5
     ages = list(range(18, 41))
     for i in range(0, len(ages), 5):
-        row = []
-        for age in ages[i:i+5]:
-            row.append(InlineKeyboardButton(
-                text=str(age), 
-                callback_data=f"account_age_{age}_{account_index}"
-            ))
+        row = [InlineKeyboardButton(text=str(age), callback_data=f"account_age_{age}_{account_index}") for age in ages[i:i+5]]
         keyboard.append(row)
-    
-    keyboard.append([InlineKeyboardButton(text=" Back", callback_data=f"account_filter_back_{account_index}")])
+    keyboard.append([InlineKeyboardButton(text="⬅️ Back", callback_data=f"account_filter_back_{account_index}")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def get_nationality_keyboard(account_index):
+def get_nationality_keyboard(account_index: int) -> InlineKeyboardMarkup:
     countries = [
         ("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"),
         ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"),
         ("BR", "🇧🇷"), ("CN", "🇨🇳"), ("JP", "🇯🇵"), ("KR", "🇰🇷"), ("CA", "🇨🇦"),
-        ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦")
     ]
-    keyboard = []
-    # "All Countries" button on its own row
-    keyboard.append([InlineKeyboardButton(text="All Countries", callback_data=f"account_nationality_all_{account_index}")])
+    keyboard = [[InlineKeyboardButton(text="All Countries", callback_data=f"account_nationality_all_{account_index}")]]
     
-    # FIX: Create a horizontal grid for country buttons
     NATIONALITIES_PER_ROW = 5
-    row = []
-    for country, flag in countries:
-        row.append(InlineKeyboardButton(
-            text=f"{flag} {country}", 
-            callback_data=f"account_nationality_{country}_{account_index}"
-        ))
-        # When the row is full, add it to the keyboard and start a new one
-        if len(row) == NATIONALITIES_PER_ROW:
-            keyboard.append(row)
-            row = []
-
-    # Add any remaining buttons in the last row if it's not empty
-    if row:
+    for i in range(0, len(countries), NATIONALITIES_PER_ROW):
+        row = [InlineKeyboardButton(text=f"{flag} {code}", callback_data=f"account_nationality_{code}_{account_index}") for code, flag in countries[i:i+NATIONALITIES_PER_ROW]]
         keyboard.append(row)
-    
-    # Back button on its own row
-    keyboard.append([InlineKeyboardButton(text=" Back", callback_data=f"account_filter_back_{account_index}")])
+
+    keyboard.append([InlineKeyboardButton(text="⬅️ Back", callback_data=f"account_filter_back_{account_index}")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
-async def apply_filter_for_account(token, user_id):
-    """Apply stored filters for a specific account"""
+
+async def apply_filter_for_account(token: str, user_id: int):
+    """Apply stored filters for a specific account. Now async."""
     try:
-        # Get stored filters for this account
-        user_filters = get_user_filters(user_id, token) or {}
+        # ASYNC CHANGE: Await the database call
+        user_filters = await get_user_filters(user_id, token) or {}
         
-        # Default filter data
         filter_data = {
             "filterGenderType": user_filters.get("filterGenderType", 7),
-            "filterBirthYearFrom": user_filters.get("filterBirthYearFrom", 1979),
+            "filterBirthYearFrom": user_filters.get("filterBirthYearFrom", 1980),
             "filterBirthYearTo": 2006,
             "filterDistance": 510,
             "filterLanguageCodes": user_filters.get("filterLanguageCodes", ""),
-            "filterNationalityBlock": user_filters.get("filterNationalityBlock", 0),
+            "filterNationalityBlock": 0,
             "filterNationalityCode": user_filters.get("filterNationalityCode", ""),
             "locale": "en"
         }
         
         url = "https://api.meeff.com/user/updateFilter/v1"
-        base_headers = {
+        device_info = get_or_create_device_info_for_token(user_id, token)
+        headers = get_headers_with_device_info({
             'User-Agent': "okhttp/4.12.0",
-            'Accept-Encoding': "gzip",
             'meeff-access-token': token,
             'content-type': "application/json; charset=utf-8"
-        }
-        
-        # Get device info for this token
-        device_info = await get_or_create_device_info_for_token(user_id, token)
-        headers = get_headers_with_device_info(base_headers, device_info)
+        }, device_info)
         
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=filter_data, headers=headers) as response:
                 if response.status == 200:
-                    print(f" Filter applied successfully for token: {token[:10]}...")
+                    logging.info(f"Filter applied successfully for token: {token[:10]}...")
                     return True
                 else:
-                    print(f" Failed to apply filter for token: {token[:10]}... Status: {response.status}")
+                    logging.warning(f"Failed to apply filter for token: {token[:10]}... Status: {response.status}")
                     return False
-                    
     except Exception as e:
-        print(f" Error applying filter: {e}")
+        logging.error(f"Error applying filter: {e}", exc_info=True)
         return False
 
 async def set_account_filter(callback_query: types.CallbackQuery):
-    """Handle account-specific filter settings"""
+    """Handle account-specific filter settings. Now fully async."""
     user_id = callback_query.from_user.id
+    data = callback_query.data
     
-    # --- THIS IS THE FIX ---
-    # Changed get_active_tokens to get_tokens.
-    # This ensures the button handler uses the same full account list as the menu,
-    # so the button index will always match the correct account.
-    tokens = get_tokens(user_id)
+    # ASYNC CHANGE: Await the database call
+    tokens = await get_tokens(user_id)
     
-    # Parse callback data
-    data_parts = callback_query.data.split('_')
-    
-    if callback_query.data == "toggle_request_filter":
-        # Toggle the request filter enable/disable
-        if user_id not in user_filter_states:
-            user_filter_states[user_id] = {}
-        
+    # --- Main Menu and Toggling ---
+    if data == "toggle_request_filter":
+        user_filter_states.setdefault(user_id, {})
         current_status = user_filter_states[user_id].get('request_filter_enabled', True)
         user_filter_states[user_id]['request_filter_enabled'] = not current_status
+        await callback_query.message.edit_reply_markup(reply_markup=await get_meeff_filter_main_keyboard(user_id))
+        await callback_query.answer(f"Request filter {'enabled' if not current_status else 'disabled'}")
+        return
+
+    if data == "meeff_filter_main":
+        await callback_query.message.edit_text("🎛️ <b>Meeff Filter Settings</b>", reply_markup=await get_meeff_filter_main_keyboard(user_id), parse_mode="HTML")
+        await callback_query.answer()
+        return
+
+    # --- Navigation to Filter Sub-menus ---
+    data_parts = data.split('_')
+    action_type = f"{data_parts[0]}_{data_parts[1]}"
+
+    if action_type == "account_filter":
+        try:
+            account_index = int(data_parts[2])
+            if account_index < len(tokens):
+                account_name = tokens[account_index].get('name', f'Account {account_index + 1}')
+                target_menu = data_parts[2] if len(data_parts) > 3 else 'main'
+                
+                if target_menu == "gender":
+                    await callback_query.message.edit_text("🚻 <b>Select Gender Filter:</b>", reply_markup=get_gender_keyboard(account_index), parse_mode="HTML")
+                elif target_menu == "age":
+                    await callback_query.message.edit_text("🎂 <b>Select Age Filter:</b>", reply_markup=get_age_keyboard(account_index), parse_mode="HTML")
+                elif target_menu == "nationality":
+                    await callback_query.message.edit_text("🌍 <b>Select Nationality Filter:</b>", reply_markup=get_nationality_keyboard(account_index), parse_mode="HTML")
+                elif target_menu == "back": # back from a sub-menu to the account menu
+                    await callback_query.message.edit_text(f"🎛️ <b>Settings for {account_name}</b>", reply_markup=get_account_filter_keyboard(account_index), parse_mode="HTML")
+                else: # main account menu
+                    await callback_query.message.edit_text(f"🎛️ <b>Settings for {account_name}</b>", reply_markup=get_account_filter_keyboard(account_index), parse_mode="HTML")
+            await callback_query.answer()
+        except (ValueError, IndexError):
+            pass # Ignore malformed callbacks
+        return
+
+    # --- Applying Filter Selections ---
+    try:
+        filter_category = data_parts[1]
+        value = data_parts[2]
+        account_index = int(data_parts[3])
+    except (ValueError, IndexError):
+        await callback_query.answer("Invalid action.")
+        return
+
+    if account_index < len(tokens):
+        token_data = tokens[account_index]
+        token = token_data['token']
+        account_name = token_data.get('name', f'Account {account_index + 1}')
+        
+        # ASYNC CHANGE: Await the database call
+        user_filters = await get_user_filters(user_id, token) or {}
+        
+        # Update filter based on category
+        if filter_category == "gender":
+            gender_map = {"male": 6, "female": 5, "all": 7}
+            user_filters["filterGenderType"] = gender_map.get(value, 7)
+            display_value = value.capitalize()
+        elif filter_category == "age":
+            user_filters["filterBirthYearFrom"] = datetime.now().year - int(value)
+            display_value = value
+        elif filter_category == "nationality":
+            user_filters["filterNationalityCode"] = "" if value == "all" else value
+            display_value = "All Countries" if value == "all" else value.upper()
+        else:
+            return # Unknown filter category
+            
+        # ASYNC CHANGE: Await the database call
+        await set_user_filters(user_id, token, user_filters)
+        await apply_filter_for_account(token, user_id)
         
         await callback_query.message.edit_text(
-            "🎛️ <b>Meeff Filter Settings</b>\n\n"
-            "Configure filters for each account and enable/disable request filtering:",
-            reply_markup=get_meeff_filter_main_keyboard(user_id),
-            parse_mode="HTML"
-        )
-        await callback_query.answer(f"Request filter {'enabled' if not current_status else 'disabled'}!")
-        return True
-    
-    elif callback_query.data == "meeff_filter_main":
-        await callback_query.message.edit_text(
-            "🎛️ <b>Meeff Filter Settings</b>\n\n"
-            "Configure filters for each account and enable/disable request filtering:",
-            reply_markup=get_meeff_filter_main_keyboard(user_id),
-            parse_mode="HTML"
-        )
-        await callback_query.answer()
-        return True
-    
-    elif callback_query.data.startswith("account_filter_") and not any(x in callback_query.data for x in ['gender', 'age', 'nationality', 'back']):
-        # Show filter options for specific account
-        account_index = int(data_parts[2])
-        if account_index < len(tokens):
-            account_name = tokens[account_index].get('name', f'Account {account_index + 1}')
-            await callback_query.message.edit_text(
-                f"🎛️ <b>Filter Settings for {account_name}</b>\n\n"
-                "Choose what to configure:",
-                reply_markup=get_account_filter_keyboard(account_index),
-                parse_mode="HTML"
-            )
-        await callback_query.answer()
-        return True
-    
-    elif callback_query.data.startswith("account_filter_gender_"):
-        account_index = int(data_parts[3])
-        await callback_query.message.edit_text(
-            " <b>Select Gender Filter:</b>",
-            reply_markup=get_gender_keyboard(account_index),
-            parse_mode="HTML"
-        )
-        await callback_query.answer()
-        return True
-    
-    elif callback_query.data.startswith("account_filter_age_"):
-        account_index = int(data_parts[3])
-        await callback_query.message.edit_text(
-            " <b>Select Age Filter:</b>",
-            reply_markup=get_age_keyboard(account_index),
-            parse_mode="HTML"
-        )
-        await callback_query.answer()
-        return True
-    
-    elif callback_query.data.startswith("account_filter_nationality_"):
-        account_index = int(data_parts[3])
-        await callback_query.message.edit_text(
-            " <b>Select Nationality Filter:</b>",
-            reply_markup=get_nationality_keyboard(account_index),
-            parse_mode="HTML"
-        )
-        await callback_query.answer()
-        return True
-    
-    elif callback_query.data.startswith("account_filter_back_"):
-        account_index = int(data_parts[3])
-        if account_index < len(tokens):
-            account_name = tokens[account_index].get('name', f'Account {account_index + 1}')
-            await callback_query.message.edit_text(
-                f"🎛️ <b>Filter Settings for {account_name}</b>\n\n"
-                "Choose what to configure:",
-                reply_markup=get_account_filter_keyboard(account_index),
-                parse_mode="HTML"
-            )
-        await callback_query.answer()
-        return True
-    
-    # Handle specific filter selections
-    elif callback_query.data.startswith("account_gender_"):
-        parts = callback_query.data.split('_')
-        gender = parts[2]
-        account_index = int(parts[3])
-        
-        if account_index < len(tokens):
-            token = tokens[account_index]['token']
-            account_name = tokens[account_index].get('name', f'Account {account_index + 1}')
-            
-            # Get current filters
-            user_filters = get_user_filters(user_id, token) or {}
-            
-            # Update gender filter
-            if gender == "male":
-                user_filters["filterGenderType"] = 6
-            elif gender == "female":
-                user_filters["filterGenderType"] = 5
-            elif gender == "all":
-                user_filters["filterGenderType"] = 7
-            
-            # Ensure other required fields exist
-            user_filters.update({
-                "filterBirthYearFrom": user_filters.get("filterBirthYearFrom", 1979),
-                "filterBirthYearTo": 2006,
-                "filterDistance": 510,
-                "filterLanguageCodes": user_filters.get("filterLanguageCodes", ""),
-                "filterNationalityBlock": user_filters.get("filterNationalityBlock", 0),
-                "filterNationalityCode": user_filters.get("filterNationalityCode", ""),
-                "locale": "en"
-            })
-            
-            # Save filters
-            set_user_filters(user_id, token, user_filters)
-            
-            # Apply filter immediately
-            await apply_filter_for_account(token, user_id)
-            
-            await callback_query.message.edit_text(
-                f" <b>Gender filter updated for {account_name}</b>\n\n"
-                f"Gender set to: {gender.capitalize()}",
-                reply_markup=get_account_filter_keyboard(account_index),
-                parse_mode="HTML"
-            )
-        await callback_query.answer()
-        return True
-    
-    elif callback_query.data.startswith("account_age_"):
-        parts = callback_query.data.split('_')
-        age = int(parts[2])
-        account_index = int(parts[3])
-        
-        if account_index < len(tokens):
-            token = tokens[account_index]['token']
-            account_name = tokens[account_index].get('name', f'Account {account_index + 1}')
-            
-            # Get current filters
-            user_filters = get_user_filters(user_id, token) or {}
-            
-            # Update age filter
-            current_year = 2025 # Using current year
-            user_filters["filterBirthYearFrom"] = current_year - age
-            user_filters["filterBirthYearTo"] = 2006
-            
-            # Ensure other required fields exist
-            user_filters.update({
-                "filterGenderType": user_filters.get("filterGenderType", 7),
-                "filterDistance": 510,
-                "filterLanguageCodes": user_filters.get("filterLanguageCodes", ""),
-                "filterNationalityBlock": user_filters.get("filterNationalityBlock", 0),
-                "filterNationalityCode": user_filters.get("filterNationalityCode", ""),
-                "locale": "en"
-            })
-            
-            # Save filters
-            set_user_filters(user_id, token, user_filters)
-            
-            # Apply filter immediately
-            await apply_filter_for_account(token, user_id)
-            
-            await callback_query.message.edit_text(
-                f"<b>Age filter updated for {account_name}</b>\n\n"
-                f"Age set to: {age}",
-                reply_markup=get_account_filter_keyboard(account_index),
-                parse_mode="HTML"
-            )
-        await callback_query.answer()
-        return True
-    
-    elif callback_query.data.startswith("account_nationality_"):
-        parts = callback_query.data.split('_')
-        nationality = parts[2]
-        account_index = int(parts[3])
-        
-        if account_index < len(tokens):
-            token = tokens[account_index]['token']
-            account_name = tokens[account_index].get('name', f'Account {account_index + 1}')
-            
-            # Get current filters
-            user_filters = get_user_filters(user_id, token) or {}
-            
-            # Update nationality filter
-            if nationality == "all":
-                user_filters["filterNationalityCode"] = ""
-            else:
-                user_filters["filterNationalityCode"] = nationality
-            
-            # Ensure other required fields exist
-            user_filters.update({
-                "filterGenderType": user_filters.get("filterGenderType", 7),
-                "filterBirthYearFrom": user_filters.get("filterBirthYearFrom", 1979),
-                "filterBirthYearTo": 2006,
-                "filterDistance": 510,
-                "filterLanguageCodes": user_filters.get("filterLanguageCodes", ""),
-                "filterNationalityBlock": user_filters.get("filterNationalityBlock", 0),
-                "locale": "en"
-            })
-            
-            # Save filters
-            set_user_filters(user_id, token, user_filters)
-            
-            # Apply filter immediately
-            await apply_filter_for_account(token, user_id)
-            
-            nationality_display = nationality.upper() if nationality != "all" else "All Countries"
-            await callback_query.message.edit_text(
-                f" <b>Nationality filter updated for {account_name}</b>\n\n"
-                f"Nationality set to: {nationality_display}",
-                reply_markup=get_account_filter_keyboard(account_index),
-                parse_mode="HTML"
-            )
-        await callback_query.answer()
-        return True
-    
-    return False
+            f"✅ <b>Filter updated for {account_name}</b>\n\n{filter_category.capitalize()} set to: <b>{display_value}</b>",
+            reply_markup=get_account_filter_keyboard(account_index), parse_mode="HTML")
+    await callback_query.answer()
 
 async def meeff_filter_command(message: types.Message):
-    """Main command to show Meeff Filter settings"""
-    user_id = message.from_user.id
+    """Main command to show Meeff Filter settings."""
     await message.answer(
-        "🎛️ <b>Meeff Filter Settings</b>\n\n"
-        "Configure filters for each account and enable/disable request filtering:",
-        reply_markup=await get_meeff_filter_main_keyboard(user_id),
-        parse_mode="HTML"
-    )
+        "🎛️ <b>Meeff Filter Settings</b>\n\nConfigure filters for each account:",
+        reply_markup=await get_meeff_filter_main_keyboard(message.from_user.id),
+        parse_mode="HTML")
 
-def is_request_filter_enabled(user_id):
-    """Check if request filter is enabled for user"""
+def is_request_filter_enabled(user_id: int) -> bool:
+    """Check if request filter is enabled for a user."""
     return user_filter_states.get(user_id, {}).get('request_filter_enabled', True)
 
-# Legacy functions for backward compatibility
+# --- Legacy function redirects for backward compatibility ---
 async def set_filter(callback_query: types.CallbackQuery):
-    """Legacy function - redirect to new system"""
     return await set_account_filter(callback_query)
 
 async def filter_command(message: types.Message):
-    """Legacy function - redirect to new system"""
     return await meeff_filter_command(message)
