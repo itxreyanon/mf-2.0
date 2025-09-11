@@ -386,6 +386,26 @@ async def get_used_email_variations(telegram_user_id, base_email):
     return []
 
 async def set_auto_signup_enabled(telegram_user_id, enabled):
+
+# Legacy functions for backward compatibility
+def has_interacted(telegram_user_id, action_type, user_token):
+    """Legacy function - checks a separate interactions collection"""
+    interaction_record = db.interactions.find_one({
+        "user_id": telegram_user_id,
+        "action_type": action_type,
+        "user_token": user_token
+    })
+    return interaction_record is not None
+
+def log_interaction(telegram_user_id, action_type, user_token):
+    """Legacy function - logs to a separate interactions collection"""
+    interaction_data = {
+        "user_id": telegram_user_id,
+        "action_type": action_type,
+        "user_token": user_token,
+        "timestamp": datetime.datetime.utcnow()
+    }
+    db.interactions.insert_one(interaction_data)
     await _ensure_user_collection_exists(telegram_user_id)
     user_db = _get_user_collection(telegram_user_id)
     await user_db.update_one({"type": "settings"}, {"$set": {"auto_signup_enabled": enabled}}, upsert=True)
