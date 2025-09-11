@@ -4,7 +4,7 @@ import logging
 import html
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from db import get_individual_spam_filter, is_already_sent, add_sent_id, get_active_tokens, get_current_account, get_already_sent_ids # Import the new function
+from db import get_individual_spam_filter, is_already_sent, add_sent_id, get_active_tokens, get_current_account, get_already_sent_ids
 from filters import apply_filter_for_account, is_request_filter_enabled
 from collections import defaultdict
 import time
@@ -125,12 +125,12 @@ async def process_users(session, users, token, user_id, bot, target_channel_id, 
     filtered_count = 0
     limit_reached = False
     
-    is_spam_filter_enabled = get_individual_spam_filter(user_id, "request")
+    is_spam_filter_enabled = await get_individual_spam_filter(user_id, "request")
 
     # Use the shared session list if available (for multi-token runs), otherwise fetch from DB
     already_sent_ids = session_sent_ids if session_sent_ids is not None else set()
     if is_spam_filter_enabled and session_sent_ids is None:
-        already_sent_ids = get_already_sent_ids(user_id, "request")
+        already_sent_ids = await get_already_sent_ids(user_id, "request")
 
     for user in users:
         if not state["running"]:
@@ -183,7 +183,7 @@ async def process_users(session, users, token, user_id, bot, target_channel_id, 
 
                 # If spam filter is on, add this user ID to the permanent database record
                 if is_spam_filter_enabled:
-                    add_sent_id(user_id, "request", user_id_to_check)
+                    await add_sent_id(user_id, "request", user_id_to_check)
 
                 # Format and send user details
                 details = format_user(user)
@@ -227,7 +227,7 @@ async def run_requests(user_id, bot, target_channel_id):
     async with aiohttp.ClientSession() as session:
         while state["running"]:
             try:
-                token = get_current_account(user_id)
+                token = await get_current_account(user_id)
                 if not token:
                     await bot.edit_message_text(
                         chat_id=user_id,
@@ -242,7 +242,7 @@ async def run_requests(user_id, bot, target_channel_id):
                     await apply_filter_for_account(token, user_id)
                     await asyncio.sleep(1)
 
-                tokens = get_active_tokens(user_id)
+                tokens = await get_active_tokens(user_id)
                 token_name = next((t.get("name", "Default") for t in tokens if t["token"] == token), "Default")
 
                 try:
@@ -313,7 +313,7 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
 
     token_status = {}
     
-    session_sent_ids = get_already_sent_ids(user_id, "request")
+    session_sent_ids = await get_already_sent_ids(user_id, "request")
     lock = asyncio.Lock()
 
     async def _worker(token_obj, idx, shared_sent_ids, shared_lock):

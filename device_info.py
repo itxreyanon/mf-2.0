@@ -50,67 +50,67 @@ def generate_device_info() -> Dict[str, str]:
         "sim_region": region, "device_gmt_offset": gmt_offset, "device_rooted": 0, "device_emulator": 0
     }
 
-def store_device_info_for_email(telegram_user_id: int, email: str, device_info: Dict[str, str]) -> bool:
+async def store_device_info_for_email(telegram_user_id: int, email: str, device_info: Dict[str, str]) -> bool:
     """Store device info for a specific email"""
-    if not _ensure_user_collection_exists(telegram_user_id): return False
+    if not await _ensure_user_collection_exists(telegram_user_id): return False
     
     # --- FIX: Sanitize the email to use as a valid key ---
     sanitized_email = _sanitize_email_for_key(email)
     
     user_db = _get_user_collection(telegram_user_id)
-    user_db.update_one(
+    await user_db.update_one(
         {"type": "device_info"},
         {"$set": {f"data.{sanitized_email}": device_info}},
         upsert=True
     )
     return True
 
-def get_device_info_for_email(telegram_user_id: int, email: str) -> Optional[Dict[str, str]]:
+async def get_device_info_for_email(telegram_user_id: int, email: str) -> Optional[Dict[str, str]]:
     """Get device info for a specific email"""
-    if not _ensure_user_collection_exists(telegram_user_id): return None
+    if not await _ensure_user_collection_exists(telegram_user_id): return None
 
     # --- FIX: Sanitize the email to look up the valid key ---
     sanitized_email = _sanitize_email_for_key(email)
     
     user_db = _get_user_collection(telegram_user_id)
-    device_doc = user_db.find_one({"type": "device_info"})
+    device_doc = await user_db.find_one({"type": "device_info"})
     if device_doc and "data" in device_doc and sanitized_email in device_doc["data"]:
         return device_doc["data"][sanitized_email]
     return None
 
-def get_or_create_device_info_for_email(telegram_user_id: int, email: str) -> Dict[str, str]:
+async def get_or_create_device_info_for_email(telegram_user_id: int, email: str) -> Dict[str, str]:
     """Get existing device info for email or create new one"""
-    device_info = get_device_info_for_email(telegram_user_id, email)
+    device_info = await get_device_info_for_email(telegram_user_id, email)
     if not device_info:
         # Also ensure the document container exists before creating a new device
         user_db = _get_user_collection(telegram_user_id)
-        if user_db.find_one({"type": "device_info"}) is None:
-            user_db.insert_one({"type": "device_info", "data": {}})
+        if await user_db.find_one({"type": "device_info"}) is None:
+            await user_db.insert_one({"type": "device_info", "data": {}})
 
         device_info = generate_device_info()
-        store_device_info_for_email(telegram_user_id, email, device_info)
+        await store_device_info_for_email(telegram_user_id, email, device_info)
     return device_info
 
 # (The rest of the file is unchanged, but included for completeness)
-def store_device_info_for_token(telegram_user_id: int, token: str, device_info: Dict[str, str]) -> bool:
-    if not _ensure_user_collection_exists(telegram_user_id): return False
+async def store_device_info_for_token(telegram_user_id: int, token: str, device_info: Dict[str, str]) -> bool:
+    if not await _ensure_user_collection_exists(telegram_user_id): return False
     user_db = _get_user_collection(telegram_user_id)
-    user_db.update_one({"type": "token_device_info"}, {"$set": {f"data.{token}": device_info}}, upsert=True)
+    await user_db.update_one({"type": "token_device_info"}, {"$set": {f"data.{token}": device_info}}, upsert=True)
     return True
 
-def get_device_info_for_token(telegram_user_id: int, token: str) -> Optional[Dict[str, str]]:
-    if not _ensure_user_collection_exists(telegram_user_id): return None
+async def get_device_info_for_token(telegram_user_id: int, token: str) -> Optional[Dict[str, str]]:
+    if not await _ensure_user_collection_exists(telegram_user_id): return None
     user_db = _get_user_collection(telegram_user_id)
-    device_doc = user_db.find_one({"type": "token_device_info"})
+    device_doc = await user_db.find_one({"type": "token_device_info"})
     if device_doc and "data" in device_doc and token in device_doc["data"]:
         return device_doc["data"][token]
     return None
 
-def get_or_create_device_info_for_token(telegram_user_id: int, token: str) -> Dict[str, str]:
-    device_info = get_device_info_for_token(telegram_user_id, token)
+async def get_or_create_device_info_for_token(telegram_user_id: int, token: str) -> Dict[str, str]:
+    device_info = await get_device_info_for_token(telegram_user_id, token)
     if not device_info:
         device_info = generate_device_info()
-        store_device_info_for_token(telegram_user_id, token, device_info)
+        await store_device_info_for_token(telegram_user_id, token, device_info)
     return device_info
 
 def get_headers_with_device_info(base_headers: Dict[str, str], device_info: Dict[str, str]) -> Dict[str, str]:

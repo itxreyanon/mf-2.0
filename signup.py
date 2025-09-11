@@ -742,14 +742,14 @@ async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds:
     user_data = login_result.get("user")
     if access_token and user_data:
         user_id = msg_obj.chat.id
-        set_token(user_id, access_token, user_data.get("name", creds.get("email")), creds.get("email"))
+        await set_token(user_id, access_token, user_data.get("name", creds.get("email")), creds.get("email"))
         user_data.update({
             "email": creds.get("email"),
             "password": creds.get("password"),
             "token": access_token
         })
         text = format_user_with_nationality(user_data)
-        set_info_card(user_id, access_token, text, creds.get("email"))
+        await set_info_card(user_id, access_token, text, creds.get("email"))
         await msg_obj.edit_text(
             "<b>Account Signed In & Saved!</b>\n\n" + text,
             parse_mode="HTML",

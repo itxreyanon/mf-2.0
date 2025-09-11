@@ -1,7 +1,7 @@
 aiogram
 aiohttp
 requests
-pymongo
+motor
 python-dateutil
 asyncio-throttle
 cachetools

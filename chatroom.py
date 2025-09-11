@@ -25,7 +25,7 @@ async def fetch_chatrooms(session, token, from_date=None, user_id=None):
     
     # Get device info for this token if user_id is provided
     if user_id:
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
     try:
@@ -45,7 +45,7 @@ async def fetch_more_chatrooms(session, token, from_date, user_id=None):
     
     # Get device info for this token if user_id is provided
     if user_id:
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
     payload = {"fromDate": from_date, "locale": "en"}
@@ -66,7 +66,7 @@ async def send_message(session, token, chatroom_id, message, user_id=None):
     
     # Get device info for this token if user_id is provided
     if user_id:
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
     payload = {"chatRoomId": chatroom_id, "message": message, "locale": "en"}

@@ -9,9 +9,9 @@ from device_info import get_or_create_device_info_for_token, get_headers_with_de
 
 # Global state for filter settings
 user_filter_states = {}
-def get_meeff_filter_main_keyboard(user_id):
+async def get_meeff_filter_main_keyboard(user_id):
     """Main Meeff Filter menu with an efficient, horizontal account layout."""
-    tokens = get_tokens(user_id)
+    tokens = await get_tokens(user_id)
     
     # Get current filter status
     filter_enabled = user_filter_states.get(user_id, {}).get('request_filter_enabled', True)
@@ -161,7 +161,7 @@ async def apply_filter_for_account(token, user_id):
         }
         
         # Get device info for this token
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(base_headers, device_info)
         
         async with aiohttp.ClientSession() as session:
@@ -416,7 +416,7 @@ async def meeff_filter_command(message: types.Message):
     await message.answer(
         "🎛️ <b>Meeff Filter Settings</b>\n\n"
         "Configure filters for each account and enable/disable request filtering:",
-        reply_markup=get_meeff_filter_main_keyboard(user_id),
+        reply_markup=await get_meeff_filter_main_keyboard(user_id),
         parse_mode="HTML"
     )
 

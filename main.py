@@ -244,12 +244,12 @@ async def send_lounge_all(message: Message) -> None:
         return
 
     custom_message = parts[1]
-    active_tokens_data = get_active_tokens(user_id)
+    active_tokens_data = await get_active_tokens(user_id)
     if not active_tokens_data:
         await message.reply("No active tokens found.")
         return
 
-    spam_enabled = get_individual_spam_filter(user_id, "lounge")
+    spam_enabled = await get_individual_spam_filter(user_id, "lounge")
     status_text = (
         f"<b>Starting Lounge Messages</b>\n\nActive tokens: {len(active_tokens_data)}\n"
         f"Message: <code>{html.escape(custom_message[:50])}...</code>\nSpam filter: {'ON' if spam_enabled else 'OFF'}"
@@ -924,6 +924,12 @@ async def set_bot_commands() -> None:
 async def main() -> None:
     """Main function to start the bot."""
     try:
+        # Check database health before starting
+        if not await check_db_health():
+            logger.error("Database connection failed. Exiting...")
+            return
+        
+        logger.info("Database connection established successfully")
         await set_bot_commands()
         dp.include_router(router)
         logger.info("Starting bot polling...")
