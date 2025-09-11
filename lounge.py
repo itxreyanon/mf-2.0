@@ -52,7 +52,7 @@ async def open_chatroom(token: str, target_user_id: str, telegram_user_id: int =
     
     # Get device info for this token if telegram_user_id is provided
     if telegram_user_id:
-        device_info = await get_or_create_device_info_for_token(telegram_user_id, token)
+        device_info = get_or_create_device_info_for_token(telegram_user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
     payload = {"waitingRoomId": target_user_id, "locale": "en"}
@@ -260,7 +260,7 @@ async def send_lounge_all_tokens(
         batch_count = 0
 
         # Get device info for this token
-        device_info = get_or_create_device_info_for_token(user_id, token) if user_id else None
+        device_info = await get_or_create_device_info_for_token(user_id, token) if user_id else None
         session_headers = BASE_HEADERS.copy()
         session_headers['meeff-access-token'] = token
         if device_info:

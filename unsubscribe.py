@@ -18,7 +18,7 @@ async def fetch_chatrooms(token, from_date=None, user_id=None):
     
     # Get device info for this token if user_id is provided
     if user_id:
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
     params = {'locale': "en"}
@@ -39,7 +39,7 @@ async def fetch_more_chatrooms(token, from_date, user_id=None):
     
     # Get device info for this token if user_id is provided
     if user_id:
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
     payload = {
@@ -61,7 +61,7 @@ async def unsubscribe_chatroom(token, chatroom_id, user_id=None):
     
     # Get device info for this token if user_id is provided
     if user_id:
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
     payload = {
