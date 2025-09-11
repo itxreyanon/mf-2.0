@@ -83,7 +83,7 @@ async def like_user(session, headers, user_id):
         return True
 
 async def run_all_countries(user_id, state, bot, get_current_account):
-    token = await get_current_account(user_id)
+    token = get_current_account(user_id)
     if not token:
         await bot.edit_message_text(
             chat_id=user_id,
@@ -92,11 +92,8 @@ async def run_all_countries(user_id, state, bot, get_current_account):
         )
         return
 
-    # Get device info for this token
-    device_info = await get_or_create_device_info_for_token(user_id, token)
-    base_headers = dict(BASE_HEADERS)
-    base_headers["meeff-access-token"] = token
-    headers = get_headers_with_device_info(base_headers, device_info)
+    headers = dict(BASE_HEADERS)
+    headers["meeff-access-token"] = token
 
     async with aiohttp.ClientSession() as session:
         country_index = 0

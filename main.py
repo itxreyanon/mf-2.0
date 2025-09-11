@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, List, Optional
 import aiohttp
 import html
 from aiogram import Bot, Dispatcher, Router
@@ -9,8 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, CallbackQuery
 from collections import defaultdict
 from aiogram.exceptions import TelegramBadRequest
-
-# Import the now ASYNC custom db modules
+# Import custom modules
 from db import (
     set_token, get_tokens, set_current_account, get_current_account, delete_token,
     set_user_filters, get_user_filters, set_spam_filter, get_spam_filter,
@@ -18,8 +17,7 @@ from db import (
     get_token_status, set_account_active, get_info_card,
     set_individual_spam_filter, get_individual_spam_filter, get_all_spam_filters,
     list_all_collections, get_collection_summary, connect_to_collection,
-    rename_user_collection, transfer_to_user, get_current_collection_info, 
-    has_valid_access as db_has_valid_access
+    rename_user_collection, transfer_to_user, get_current_collection_info
 )
 from lounge import send_lounge, send_lounge_all_tokens
 from chatroom import send_message_to_everyone, send_message_to_everyone_all_tokens
@@ -53,25 +51,21 @@ bot = Bot(token=API_TOKEN)
 router = Router()
 dp = Dispatcher()
 
-# --- Utility Functions ---
+# Utility Functions
 def is_admin(user_id: int) -> bool:
     """Check if the user is an admin."""
     return user_id in ADMIN_USER_IDS
 
-async def has_valid_access(user_id: int) -> bool:
+def has_valid_access(user_id: int) -> bool:
     """Verify if the user has valid access (admin or temporary password)."""
     if is_admin(user_id):
         return True
-    # Check for temporary password access
-    if user_id in password_access and password_access[user_id] > datetime.now():
-        return True
-    # Check for persistent access via an existing database collection
-    return await db_has_valid_access(user_id)
+    return user_id in password_access and password_access[user_id] > datetime.now()
 
-# --- Inline Keyboard Menus ---
-async def get_settings_menu(user_id: int) -> InlineKeyboardMarkup:
-    """Generate the settings menu. Must be async to fetch spam filter status."""
-    spam_filters = await get_all_spam_filters(user_id)
+# Inline Keyboard Menus
+def get_settings_menu(user_id: int) -> InlineKeyboardMarkup:
+    """Generate the settings menu with spam filter status."""
+    spam_filters = get_all_spam_filters(user_id)
     any_spam_on = any(spam_filters.values())
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -107,9 +101,9 @@ def get_unsubscribe_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Back", callback_data="back_to_menu")]
     ])
 
-async def get_spam_filter_menu(user_id: int) -> InlineKeyboardMarkup:
-    """Generate the spam filter settings menu. Must be async."""
-    spam_filters = await get_all_spam_filters(user_id)
+def get_spam_filter_menu(user_id: int) -> InlineKeyboardMarkup:
+    """Generate the spam filter settings menu."""
+    spam_filters = get_all_spam_filters(user_id)
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Chatroom: {'ON' if spam_filters['chatroom'] else 'OFF'}", callback_data="toggle_spam_chatroom")],
         [InlineKeyboardButton(text=f"Requests: {'ON' if spam_filters['request'] else 'OFF'}", callback_data="toggle_spam_request")],
@@ -138,18 +132,33 @@ def get_confirmation_menu(action_type: str) -> InlineKeyboardMarkup:
         ]
     ])
 
-# --- Predefined Keyboards ---
-start_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Send Request", callback_data="send_request_menu"), InlineKeyboardButton(text="All Countries", callback_data="all_countries")]])
-send_request_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Start Request", callback_data="start"), InlineKeyboardButton(text="Request All", callback_data="start_all")], [InlineKeyboardButton(text="Back", callback_data="back_to_menu")]])
-back_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Back", callback_data="back_to_menu")]])
+# Predefined Keyboards
+start_markup = InlineKeyboardMarkup(inline_keyboard=[
+    [
+        InlineKeyboardButton(text="Send Request", callback_data="send_request_menu"),
+        InlineKeyboardButton(text="All Countries", callback_data="all_countries")
+    ]
+])
 
-# --- Command Handlers ---
+send_request_markup = InlineKeyboardMarkup(inline_keyboard=[
+    [
+        InlineKeyboardButton(text="Start Request", callback_data="start"),
+        InlineKeyboardButton(text="Request All", callback_data="start_all")
+    ],
+    [InlineKeyboardButton(text="Back", callback_data="back_to_menu")]
+])
+
+back_markup = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Back", callback_data="back_to_menu")]
+])
+
+# Command Handlers
 @router.message(Command("password"))
 async def password_command(message: Message) -> None:
     """Handle the /password command to grant temporary access."""
     user_id = message.chat.id
     try:
-        provided_password = message.text.split(maxsplit=1)[1]
+        provided_password = message.text.split()[1]
         if provided_password == TEMP_PASSWORD:
             password_access[user_id] = datetime.now() + timedelta(hours=1)
             await message.reply("Access granted for one hour.")
@@ -167,263 +176,386 @@ async def password_command(message: Message) -> None:
 async def start_command(message: Message) -> None:
     """Handle the /start command to display the bot dashboard."""
     user_id = message.chat.id
-    if not await has_valid_access(user_id):
-        return await message.reply("You are not authorized to use this bot. Use /password to get access.")
-    
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized to use this bot. Use /password to get access.")
+        return
     state = user_states.setdefault(user_id, {})
     status = await message.reply(
         "<b>Meeff Bot Dashboard</b>\n\nChoose an option below to get started:",
-        reply_markup=start_markup, parse_mode="HTML"
+        reply_markup=start_markup,
+        parse_mode="HTML"
     )
     state["status_message_id"] = status.message_id
     state["pinned_message_id"] = None
 
 @router.message(Command("signup"))
 async def signup_cmd(message: Message) -> None:
-    if not await has_valid_access(message.chat.id): return await message.reply("You are not authorized.")
+    """Handle the /signup command."""
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized.")
+        return
     await signup_command(message)
 
 @router.message(Command("signup_settings"))
 async def signup_settings_cmd(message: Message) -> None:
-    if not await has_valid_access(message.chat.id): return await message.reply("You are not authorized.")
+    """Handle the /signup_settings command."""
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized.")
+        return
     await signup_settings_command(message)
 
 @router.message(Command("signin"))
 async def signin_cmd(message: Message) -> None:
-    if not await has_valid_access(message.chat.id): return await message.reply("You are not authorized.")
+    """Handle the /signin command."""
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized.")
+        return
     from signup import user_signup_states, BACK_TO_SIGNUP
     user_signup_states[message.from_user.id] = {"stage": "signin_email"}
-    await message.reply("<b>Sign In</b>\n\nPlease enter your email address:", reply_markup=BACK_TO_SIGNUP, parse_mode="HTML")
+    await message.reply(
+        "<b>Sign In</b>\n\nPlease enter your email address:",
+        reply_markup=BACK_TO_SIGNUP,
+        parse_mode="HTML"
+    )
 
 @router.message(Command("skip"))
 async def skip_command(message: Message) -> None:
-    if not await has_valid_access(message.chat.id): return await message.reply("You are not authorized.")
-    await message.reply("<b>Unsubscribe Options</b>\nChoose accounts to unsubscribe:", reply_markup=get_unsubscribe_menu(), parse_mode="HTML")
+    """Handle the /skip command to show unsubscribe options."""
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized.")
+        return
+    await message.reply(
+        "<b>Unsubscribe Options</b>\n\nChoose which accounts to unsubscribe from chatrooms:",
+        reply_markup=get_unsubscribe_menu(),
+        parse_mode="HTML"
+    )
 
 @router.message(Command("send_lounge_all"))
 async def send_lounge_all(message: Message) -> None:
+    """Handle the /send_lounge_all command to send lounge messages for all accounts."""
     user_id = message.chat.id
-    if not await has_valid_access(user_id): return await message.reply("You are not authorized.")
-    
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2: return await message.reply("<b>Usage:</b> <code>/send_lounge_all &lt;message&gt;</code>", parse_mode="HTML")
-    
-    custom_message = parts[1]
-    active_tokens_data = await get_active_tokens(user_id)
-    if not active_tokens_data: return await message.reply("No active tokens found.")
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized.")
+        return
 
-    spam_enabled = await get_individual_spam_filter(user_id, "lounge")
-    status = await message.reply(f"<b>Starting Lounge AIO</b>\nTokens: {len(active_tokens_data)}\nSpam Filter: {'ON' if spam_enabled else 'OFF'}", parse_mode="HTML")
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await message.reply("<b>Usage</b>\n\n<code>/send_lounge_all &lt;message&gt;</code>", parse_mode="HTML")
+        return
+
+    custom_message = parts[1]
+    active_tokens_data = get_active_tokens(user_id)
+    if not active_tokens_data:
+        await message.reply("No active tokens found.")
+        return
+
+    spam_enabled = get_individual_spam_filter(user_id, "lounge")
+    status_text = (
+        f"<b>Starting Lounge Messages</b>\n\nActive tokens: {len(active_tokens_data)}\n"
+        f"Message: <code>{html.escape(custom_message[:50])}...</code>\nSpam filter: {'ON' if spam_enabled else 'OFF'}"
+    )
+    status = await message.reply(status_text, parse_mode="HTML")
 
     try:
         await send_lounge_all_tokens(active_tokens_data, custom_message, status, bot, user_id, spam_enabled, user_id)
     except Exception as e:
-        await status.edit_text(f"An error occurred: {e}")
-        logger.error(f"Error in /send_lounge_all", exc_info=True)
+        await status.edit_text(f"Error sending lounge messages: {str(e)}")
+        logger.error(f"Error in /send_lounge_all: {str(e)}")
 
 @router.message(Command("lounge"))
 async def lounge_command(message: Message) -> None:
+    """Handle the /lounge command to send a message to the lounge."""
     user_id = message.chat.id
-    if not await has_valid_access(user_id): return await message.reply("You are not authorized.")
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized.")
+        return
 
-    token = await get_current_account(user_id)
-    if not token: return await message.reply("No active account selected.")
-    
+    token = get_current_account(user_id)
+    if not token:
+        await message.reply("No active account found.")
+        return
+
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2: return await message.reply("<b>Usage:</b> <code>/lounge &lt;message&gt;</code>", parse_mode="HTML")
-    
+    if len(parts) != 2:
+        await message.reply("<b>Usage</b>\n\n<code>/lounge &lt;message&gt;</code>", parse_mode="HTML")
+        return
+
     custom_message = parts[1]
-    spam_enabled = await get_individual_spam_filter(user_id, "lounge")
-    status_message = await message.reply(f"<b>Starting Lounge Messaging...</b>\nSpam Filter: {'ON' if spam_enabled else 'OFF'}", parse_mode="HTML")
+    spam_enabled = get_individual_spam_filter(user_id, "lounge")
+    status_text = (
+        f"<b>Starting Lounge Messaging</b>\n\nMessage: <code>{html.escape(custom_message[:50])}...</code>\n"
+        f"Spam filter: {'ON' if spam_enabled else 'OFF'}"
+    )
+    status_message = await message.reply(status_text, parse_mode="HTML")
 
     try:
-        await send_lounge(token, custom_message, status_message, bot, user_id, spam_enabled, user_id)
+        await send_lounge(token, custom_message, status_message, bot, user_id, spam_enabled)
     except Exception as e:
-        await status_message.edit_text(f"An error occurred: {e}")
-        logger.error(f"Error in /lounge", exc_info=True)
+        await status_message.edit_text(f"Error sending lounge messages: {str(e)}")
+        logger.error(f"Error in /lounge: {str(e)}")
 
 @router.message(Command("chatroom"))
 async def send_to_all_command(message: Message) -> None:
+    """Handle the /chatroom command to send messages to all chatrooms."""
     user_id = message.chat.id
-    if not await has_valid_access(user_id): return await message.reply("You are not authorized.")
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized.")
+        return
 
-    token = await get_current_account(user_id)
-    if not token: return await message.reply("No active account selected.")
+    token = get_current_account(user_id)
+    if not token:
+        await message.reply("No active account found.")
+        return
 
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2: return await message.reply("<b>Usage:</b> <code>/chatroom &lt;message&gt;</code>", parse_mode="HTML")
+    if len(parts) != 2:
+        await message.reply("<b>Usage</b>\n\n<code>/chatroom &lt;message&gt;</code>", parse_mode="HTML")
+        return
 
     custom_message = parts[1]
-    spam_enabled = await get_individual_spam_filter(user_id, "chatroom")
-    status_message = await message.reply(f"<b>Starting Chatroom Messaging...</b>\nSpam Filter: {'ON' if spam_enabled else 'OFF'}", parse_mode="HTML")
+    spam_enabled = get_individual_spam_filter(user_id, "chatroom")
+    status_text = (
+        f"<b>Starting Chatroom Messages</b>\n\nMessage: <code>{html.escape(custom_message[:50])}...</code>\n"
+        f"Spam filter: {'ON' if spam_enabled else 'OFF'}\n\nInitializing..."
+    )
+    status_message = await message.reply(status_text, parse_mode="HTML")
 
     try:
         total, sent, filtered = await send_message_to_everyone(token, custom_message, user_id, spam_enabled, user_id)
         await status_message.edit_text(
-            f"<b>Chatroom Complete</b>\n- Total: <code>{total}</code>\n- Sent: <code>{sent}</code>\n- Filtered: <code>{filtered}</code>",
-            parse_mode="HTML")
+            f"<b>Chatroom Messages Complete</b>\n\n<b>Results:</b>\n• Total chatrooms: <code>{total}</code>\n"
+            f"• Messages sent: <code>{sent}</code>\n• Filtered: <code>{filtered}</code>",
+            parse_mode="HTML"
+        )
     except Exception as e:
-        await status_message.edit_text(f"An error occurred: {e}")
-        logger.error(f"Error in /chatroom", exc_info=True)
+        await status_message.edit_text(f"<b>Error</b>\n\nFailed to send messages: {str(e)[:200]}", parse_mode="HTML")
+        logger.error(f"Error in /chatroom: {str(e)}")
 
 @router.message(Command("send_chat_all"))
 async def send_chat_all(message: Message) -> None:
+    """Handle the /send_chat_all command to send messages to all chatrooms for all accounts."""
     user_id = message.chat.id
-    if not await has_valid_access(user_id): return await message.reply("You are not authorized.")
-    
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized.")
+        return
+
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2: return await message.reply("<b>Usage:</b> <code>/send_chat_all &lt;message&gt;</code>", parse_mode="HTML")
-    
+    if len(parts) != 2:
+        await message.reply("<b>Usage</b>\n\n<code>/send_chat_all &lt;message&gt;</code>", parse_mode="HTML")
+        return
+
     custom_message = parts[1]
-    active_tokens = await get_active_tokens(user_id)
-    if not active_tokens: return await message.reply("No active tokens found.")
+    active_tokens = get_active_tokens(user_id)
+    if not active_tokens:
+        await message.reply("No active tokens found.")
+        return
 
     tokens = [t["token"] for t in active_tokens]
-    token_names = {t["token"]: t.get("name", "N/A") for t in active_tokens}
-    spam_enabled = await get_individual_spam_filter(user_id, "chatroom")
-    status = await message.reply(f"<b>Starting Chatroom AIO</b>\nTokens: {len(tokens)}\nSpam Filter: {'ON' if spam_enabled else 'OFF'}", parse_mode="HTML")
+    token_names = {t["token"]: t["name"] for t in active_tokens}
+    spam_enabled = get_individual_spam_filter(user_id, "chatroom")
+    status_text = (
+        f"<b>Starting Multi-Account Chatroom</b>\n\nActive tokens: <code>{len(tokens)}</code>\n"
+        f"Message: <code>{html.escape(custom_message[:50])}...</code>\nSpam filter: {'ON' if spam_enabled else 'OFF'}\n\nInitializing..."
+    )
+    status = await message.reply(status_text, parse_mode="HTML")
 
     try:
         await send_message_to_everyone_all_tokens(tokens, custom_message, status, bot, user_id, spam_enabled, token_names, False, user_id)
     except Exception as e:
-        await status.edit_text(f"An error occurred: {e}")
-        logger.error(f"Error in /send_chat_all", exc_info=True)
+        await status.edit_text(f"<b>Error</b>\n\nFailed to send messages: {str(e)[:200]}", parse_mode="HTML")
+        logger.error(f"Error in /send_chat_all: {str(e)}")
 
 @router.message(Command("invoke"))
 async def invoke_command(message: Message) -> None:
+    """Handle the /invoke command to remove disabled accounts."""
     user_id = message.chat.id
-    if not await has_valid_access(user_id): return await message.reply("You are not authorized.")
-    
-    tokens = await get_tokens(user_id)
-    if not tokens: return await message.reply("No tokens found to check.")
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized.")
+        return
 
-    status_msg = await message.reply(f"<b>Checking {len(tokens)} Accounts...</b>", parse_mode="HTML")
+    tokens = get_tokens(user_id)
+    if not tokens:
+        await message.reply("No tokens found.")
+        return
+
+    status_msg = await message.reply("<b>Checking Account Status</b>...", parse_mode="HTML")
     disabled_accounts, working_accounts = [], []
     url = "https://api.meeff.com/facetalk/vibemeet/history/count/v1"
+    params = {'locale': "en"}
 
     async with aiohttp.ClientSession() as session:
-        tasks = []
         for token_obj in tokens:
-            async def check(t_obj):
-                headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'meeff-access-token': t_obj["token"]}
-                try:
-                    async with session.get(url, params={'locale': "en"}, headers=headers, timeout=10) as resp:
-                        result = await resp.json(content_type=None)
-                        return "disabled" if result.get("errorCode") == "AuthRequired" else "working"
-                except Exception as e:
-                    logger.error(f"Error checking token {t_obj.get('name')}: {e}")
-                    return "disabled"
-            tasks.append(check(token_obj))
-        
-        results = await asyncio.gather(*tasks)
-        for token_obj, status in zip(tokens, results):
-            (disabled_accounts if status == "disabled" else working_accounts).append(token_obj)
+            headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'meeff-access-token': token_obj["token"]}
+            try:
+                async with session.get(url, params=params, headers=headers) as resp:
+                    result = await resp.json(content_type=None)
+                    if result.get("errorCode") == "AuthRequired":
+                        disabled_accounts.append(token_obj)
+                    else:
+                        working_accounts.append(token_obj)
+            except Exception as e:
+                logger.error(f"Error checking token {token_obj.get('name')}: {e}")
+                disabled_accounts.append(token_obj)
 
     if disabled_accounts:
-        await asyncio.gather(*(delete_token(user_id, t["token"]) for t in disabled_accounts))
-        removed_names = "\n".join([f"- <code>{html.escape(acc['name'])}</code>" for acc in disabled_accounts])
+        for token_obj in disabled_accounts:
+            delete_token(user_id, token_obj["token"])
         await status_msg.edit_text(
-            f"<b>Account Cleanup Complete</b>\n- Working: <code>{len(working_accounts)}</code>\n- Removed: <code>{len(disabled_accounts)}</code>\n\n<b>Removed:</b>\n{removed_names}",
-            parse_mode="HTML")
+            f"<b>Account Cleanup Complete</b>\n\nWorking: <code>{len(working_accounts)}</code>\n"
+            f"Removed: <code>{len(disabled_accounts)}</code>\n\n<b>Removed accounts:</b>\n" +
+            "\n".join([f"• {html.escape(acc['name'])}" for acc in disabled_accounts]),
+            parse_mode="HTML"
+        )
     else:
-        await status_msg.edit_text(f"<b>All {len(working_accounts)} accounts are working.</b>", parse_mode="HTML")
+        await status_msg.edit_text(f"<b>All Accounts Working</b> ({len(working_accounts)} total).", parse_mode="HTML")
 
 @router.message(Command("settings"))
 async def settings_command(message: Message) -> None:
-    if not await has_valid_access(message.chat.id): return await message.reply("You are not authorized.")
-    await message.reply("<b>Settings Menu</b>\n\nChoose an option:", reply_markup=await get_settings_menu(message.chat.id), parse_mode="HTML")
+    """Handle the /settings command to show the settings menu."""
+    if not has_valid_access(message.chat.id):
+        await message.reply("You are not authorized.")
+        return
+    await message.reply(
+        "<b>Settings Menu</b>\n\nChoose an option:",
+        reply_markup=get_settings_menu(message.chat.id),
+        parse_mode="HTML"
+    )
 
 @router.message(Command("add"))
 async def add_person_command(message: Message) -> None:
+    """Handle the /add command to add a person by ID."""
     user_id = message.chat.id
-    if not await has_valid_access(user_id): return await message.reply("You are not authorized.")
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized.")
+        return
 
     args = message.text.strip().split()
-    if len(args) < 2: return await message.reply("Usage: /add <person_id>")
+    if len(args) < 2:
+        await message.reply("Usage: /add <person_id>")
+        return
 
-    token = await get_current_account(user_id)
-    if not token: return await message.reply("No active account selected.")
+    token = get_current_account(user_id)
+    if not token:
+        await message.reply("No active account found.")
+        return
 
     person_id = args[1]
     url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={person_id}&isOkay=1"
     
+    # Get device info for this token
     device_info = get_or_create_device_info_for_token(user_id, token)
-    headers = get_headers_with_device_info({"meeff-access-token": token}, device_info)
+    base_headers = {"meeff-access-token": token}
+    headers = get_headers_with_device_info(base_headers, device_info)
     
     try:
-        async with aiohttp.ClientSession() as session, session.get(url, headers=headers) as response:
-            data = await response.json()
-            if data.get("errorCode") == "LikeExceeded": await message.reply("Daily like limit reached.")
-            elif data.get("errorCode"): await message.reply(f"Failed: {data.get('errorMessage', 'Unknown error')}")
-            else: await message.reply(f"Successfully sent request to ID: {person_id}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                data = await response.json()
+                if data.get("errorCode") == "LikeExceeded":
+                    await message.reply("Daily like limit reached.")
+                elif data.get("errorCode"):
+                    await message.reply(f"Failed: {data.get('errorMessage', 'Unknown error')}")
+                else:
+                    await message.reply(f"Successfully added person with ID: {person_id}")
     except Exception as e:
         logger.error(f"Error adding person by ID: {e}")
         await message.reply("An error occurred.")
 
-# --- Generic Message Handler ---
 @router.message()
-async def handle_message(message: Message) -> None:
+async def handle_new_token(message: Message) -> None:
     """Handle incoming messages for token addition or database operations."""
-    if not message.text or message.text.startswith("/") or message.from_user.is_bot: return
+    if message.text and message.text.startswith("/"):
+        return
     user_id = message.from_user.id
+    if message.from_user.is_bot:
+        return
 
-    if await signup_message_handler(message): return
+    if await signup_message_handler(message):
+        return
 
     state = db_operation_states.get(user_id)
     if state:
         operation = state.get("operation")
         text = message.text.strip()
-        msg_to_edit = await message.reply("Processing...")
-        success, msg = False, "Invalid operation"
 
         if operation == "connect_db":
             collection_name = f"user_{text}" if not text.startswith("user_") else text
-            success, msg = await connect_to_collection(collection_name, user_id)
+            processing_msg = await message.reply("<b>Connecting to DB</b>...", parse_mode="HTML")
+            success, msg = connect_to_collection(collection_name, user_id)
+            await processing_msg.edit_text(f"<b>{'Success' if success else 'Failed'}</b>: {msg}", parse_mode="HTML")
         elif operation == "rename_db":
-            success, msg = await rename_user_collection(user_id, text)
+            processing_msg = await message.reply("<b>Renaming DB</b>...", parse_mode="HTML")
+            success, msg = rename_user_collection(user_id, text)
+            await processing_msg.edit_text(f"<b>{'Success' if success else 'Failed'}</b>: {msg}", parse_mode="HTML")
         elif operation == "transfer_db":
-            try: success, msg = await transfer_to_user(user_id, int(text))
-            except ValueError: msg = "Invalid user ID."
-
-        await msg_to_edit.edit_text(f"<b>Result:</b> {msg}", parse_mode="HTML")
+            try:
+                target_user_id = int(text)
+                processing_msg = await message.reply("<b>Transferring DB</b>...", parse_mode="HTML")
+                success, msg = transfer_to_user(user_id, target_user_id)
+                await processing_msg.edit_text(f"<b>{'Success' if success else 'Failed'}</b>: {msg}", parse_mode="HTML")
+            except ValueError:
+                await message.reply("Invalid user ID.")
+        
         db_operation_states.pop(user_id, None)
         return
 
-    if not await has_valid_access(user_id): return await message.reply("You are not authorized.")
+    if not has_valid_access(user_id):
+        await message.reply("You are not authorized.")
+        return
 
-    token_data = message.text.strip().split(" ", 1)
-    token = token_data[0]
-    if len(token) < 100: return await message.reply("Invalid token format.")
+    if message.text:
+        token_data = message.text.strip().split(" ", 1)
+        token = token_data[0]
+        if len(token) < 100:
+            await message.reply("Invalid token format.")
+            return
 
-    verification_msg = await message.reply("<b>Verifying Token...</b>", parse_mode="HTML")
-    url = "https://api.meeff.com/facetalk/vibemeet/history/count/v1"
-    
-    device_info = get_or_create_device_info_for_token(user_id, token)
-    headers = get_headers_with_device_info({'User-Agent': "okhttp/5.0.0-alpha.14", 'meeff-access-token': token}, device_info)
+        verification_msg = await message.reply("<b>Verifying Token</b>...", parse_mode="HTML")
+        url = "https://api.meeff.com/facetalk/vibemeet/history/count/v1"
+        params = {'locale': "en"}
+        
+        # Get or create device info for this token
+        device_info = get_or_create_device_info_for_token(user_id, token)
+        base_headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'meeff-access-token': token}
+        headers = get_headers_with_device_info(base_headers, device_info)
 
-    try:
-        async with aiohttp.ClientSession() as session, session.get(url, params={'locale': "en"}, headers=headers) as resp:
-            result = await resp.json(content_type=None)
-            if result.get("errorCode") == "AuthRequired":
-                return await verification_msg.edit_text("<b>Token is invalid or expired.</b>", parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Error verifying token: {e}")
-        return await verification_msg.edit_text("<b>Token verification failed.</b>", parse_mode="HTML")
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, params=params, headers=headers) as resp:
+                    result = await resp.json(content_type=None)
+                    if result.get("errorCode") == "AuthRequired":
+                        await verification_msg.edit_text("<b>Invalid Token</b>.", parse_mode="HTML")
+                        return
+            except Exception as e:
+                logger.error(f"Error verifying token: {e}")
+                await verification_msg.edit_text("<b>Verification Error</b>.", parse_mode="HTML")
+                return
 
-    current_tokens = await get_tokens(user_id)
-    account_name = token_data[1] if len(token_data) > 1 else f"Account {len(current_tokens) + 1}"
-    await set_token(user_id, token, account_name)
-    
-    await verification_msg.edit_text(f"<b>Token saved as '<code>{html.escape(account_name)}</code>'.</b>", parse_mode="HTML")
+        account_name = token_data[1] if len(token_data) > 1 else f"Account {len(get_tokens(user_id)) + 1}"
+        set_token(user_id, token, account_name)
+        
+        # Store device info for this token (already created above)
+        await verification_msg.edit_text(
+            f"<b>Token Verified</b> and saved as '<code>{html.escape(account_name)}</code>'.",
+            parse_mode="HTML"
+        )
+    else:
+        await message.reply("Please provide a token.")
 
 async def show_manage_accounts_menu(callback_query: CallbackQuery) -> None:
-    """Display the manage accounts menu. Now fully async."""
+    """Display the manage accounts menu."""
     user_id = callback_query.from_user.id
-    tokens = await get_tokens(user_id)
-    current_token = await get_current_account(user_id)
+    tokens = get_tokens(user_id)
+    current_token = get_current_account(user_id)
 
     if not tokens:
-        return await callback_query.message.edit_text("<b>No Accounts Found</b>\nSend a token to add one.", reply_markup=back_markup, parse_mode="HTML")
+        # This part is fine, as it's a different message content
+        await callback_query.message.edit_text(
+            "<b>No Accounts Found</b>\n\nSend a token to add an account.",
+            reply_markup=back_markup,
+            parse_mode="HTML"
+        )
+        return
 
     buttons = []
     for i, tok in enumerate(tokens):
@@ -437,182 +569,337 @@ async def show_manage_accounts_menu(callback_query: CallbackQuery) -> None:
         ])
     buttons.append([InlineKeyboardButton(text="Back", callback_data="settings_menu")])
 
-    message_text = f"<b>Manage Accounts</b>\n\nSelect an account to make it current."
-    try:
-        await callback_query.message.edit_text(text=message_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e): await callback_query.answer()
-        else: logger.error(f"Error in show_manage_accounts_menu: {e}")
+    current_text = "A current account is set." if current_token else "No current account is set."
+    message_text = f"<b>Manage Accounts</b>\n\n{current_text}"
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- Callback Query Handler ---
+    # --- START OF FIX ---
+    try:
+        await callback_query.message.edit_text(
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in e.message:
+            # This error is safe to ignore, it just means the menu is already up-to-date.
+            await callback_query.answer() # Acknowledge the button press without an alert
+            logger.info("Message not modified, skipping edit.")
+        else:
+            # If it's a different error, we should still see it.
+            logger.error(f"Error editing message: {e}")
+            raise
+
+
 @router.callback_query()
 async def callback_handler(callback_query: CallbackQuery) -> None:
-    """Handle all callback queries from inline keyboards."""
+    """Handle callback queries from inline keyboards."""
     user_id = callback_query.from_user.id
     data = callback_query.data
 
-    if await signup_callback_handler(callback_query): return
-    if not await has_valid_access(user_id): return await callback_query.answer("You are not authorized.")
+    if await signup_callback_handler(callback_query):
+        return
+
+    if not has_valid_access(user_id):
+        await callback_query.answer("You are not authorized.")
+        return
 
     state = user_states.setdefault(user_id, {})
-    
-    # --- DB Settings ---
+
     if data == "db_settings":
-        current_info = await get_current_collection_info(user_id)
-        info_text = "<b>Database Settings</b>\n"
+        current_info = get_current_collection_info(user_id)
+        info_text = "<b>Database Settings</b>\n\n"
         if current_info["exists"]:
             summary = current_info["summary"]
-            info_text += f"DB Name: <code>{html.escape(current_info['collection_name'])}</code>\nAccounts: <code>{summary.get('tokens_count', 0)}</code>"
-        else: info_text += "No database found for your account."
-        await callback_query.message.edit_text(info_text, reply_markup=get_db_settings_menu(), parse_mode="HTML")
+            info_text += (
+                f"<b>Current DB:</b> <code>{html.escape(current_info['collection_name'])}</code>\n"
+                f"Accounts: <code>{summary.get('tokens_count', 0)}</code>\n"
+            )
+        else:
+            info_text += "No database found for your account.\n\n"
+        await callback_query.message.edit_text(
+            info_text + "Choose an option:",
+            reply_markup=get_db_settings_menu(),
+            parse_mode="HTML"
+        )
     elif data == "db_connect":
         db_operation_states[user_id] = {"operation": "connect_db"}
-        await callback_query.message.edit_text("<b>Connect DB:</b> Enter the source user ID to connect to:", parse_mode="HTML")
+        await callback_query.message.edit_text(
+            "<b>Connect to Database</b>\n\nEnter the collection name:",
+            parse_mode="HTML"
+        )
     elif data == "db_rename":
         db_operation_states[user_id] = {"operation": "rename_db"}
-        await callback_query.message.edit_text("<b>Rename DB:</b> Enter the new name (without 'user_'):", parse_mode="HTML")
+        await callback_query.message.edit_text(
+            "<b>Rename Database</b>\n\nEnter the new name:",
+            parse_mode="HTML"
+        )
     elif data == "db_view":
-        collections = await list_all_collections()
-        if not collections: return await callback_query.message.edit_text("<b>No Collections Found.</b>", reply_markup=get_db_settings_menu(), parse_mode="HTML")
-        view_text = "<b>All Database Collections (Top 10)</b>\n\n"
+        collections = list_all_collections()
+        if not collections:
+            await callback_query.message.edit_text(
+                "<b>No Collections Found.</b>",
+                reply_markup=get_db_settings_menu(),
+                parse_mode="HTML"
+            )
+            return
+        view_text = "<b>All Database Collections</b>\n\n"
         for i, col in enumerate(collections[:10], 1):
             summary = col["summary"]
             created_str = summary.get("created_at").strftime("%Y-%m-%d") if summary.get("created_at") else "N/A"
-            view_text += f"<b>{i}.</b> <code>{html.escape(col['user_id'])}</code> ({summary.get('tokens_count', 0)} accs) - <i>{created_str}</i>\n"
-        await callback_query.message.edit_text(view_text, reply_markup=get_db_settings_menu(), parse_mode="HTML")
+            view_text += (
+                f"<b>{i}.</b> <code>{html.escape(col['collection_name'])}</code>\n"
+                f"    Accounts: {summary.get('tokens_count', 0)} | Created: {created_str}\n\n"
+            )
+        await callback_query.message.edit_text(
+            view_text,
+            reply_markup=get_db_settings_menu(),
+            parse_mode="HTML"
+        )
     elif data == "db_transfer":
         db_operation_states[user_id] = {"operation": "transfer_db"}
-        await callback_query.message.edit_text("<b>Transfer DB:</b> Enter the target Telegram user ID:", parse_mode="HTML")
-
-    # --- Unsubscribe ---
+        await callback_query.message.edit_text(
+            "<b>Transfer Database</b>\n\nEnter the target Telegram user ID:",
+            parse_mode="HTML"
+        )
     elif data == "unsub_current":
-        await callback_query.message.edit_text("<b>Confirm:</b> Unsubscribe current account from all chats?", reply_markup=get_confirmation_menu("unsub_current"), parse_mode="HTML")
+        await callback_query.message.edit_text(
+            "<b>Confirm:</b> Unsubscribe current account from all chatrooms?",
+            reply_markup=get_confirmation_menu("unsub_current"),
+            parse_mode="HTML"
+        )
     elif data == "unsub_all":
-        count = len(await get_active_tokens(user_id))
-        await callback_query.message.edit_text(f"<b>Confirm:</b> Unsubscribe all {count} active accounts?", reply_markup=get_confirmation_menu("unsub_all"), parse_mode="HTML")
+        count = len(get_active_tokens(user_id))
+        await callback_query.message.edit_text(
+            f"<b>Confirm:</b> Unsubscribe all {count} active accounts?",
+            reply_markup=get_confirmation_menu("unsub_all"),
+            parse_mode="HTML"
+        )
     elif data == "confirm_unsub_current":
-        token = await get_current_account(user_id)
-        if not token: return await callback_query.message.edit_text("No active account selected.", reply_markup=back_markup, parse_mode="HTML")
-        msg = await callback_query.message.edit_text("<b>Unsubscribing Current Account...</b>", parse_mode="HTML")
+        token = get_current_account(user_id)
+        if not token:
+            await callback_query.message.edit_text(
+                "No active account found.",
+                reply_markup=back_markup,
+                parse_mode="HTML"
+            )
+            return
+        msg = await callback_query.message.edit_text(
+            "<b>Unsubscribing Current Account</b>...",
+            parse_mode="HTML"
+        )
         await unsubscribe_everyone(token, status_message=msg, bot=bot, chat_id=user_id, user_id=user_id)
     elif data == "confirm_unsub_all":
-        active_tokens = await get_active_tokens(user_id)
-        if not active_tokens: return await callback_query.message.edit_text("No active accounts found.", reply_markup=back_markup, parse_mode="HTML")
-        msg = await callback_query.message.edit_text(f"<b>Unsubscribing {len(active_tokens)} Accounts...</b>", parse_mode="HTML")
-        # This can be slow, might be better to run them in parallel with asyncio.gather
+        active_tokens = get_active_tokens(user_id)
+        if not active_tokens:
+            await callback_query.message.edit_text(
+                "No active accounts found.",
+                reply_markup=back_markup,
+                parse_mode="HTML"
+            )
+            return
+        msg = await callback_query.message.edit_text(
+            f"<b>Unsubscribing All Accounts</b> ({len(active_tokens)})...",
+            parse_mode="HTML"
+        )
+        total = 0
         for i, token_obj in enumerate(active_tokens, 1):
-            await msg.edit_text(f"Processing {i}/{len(active_tokens)}: {html.escape(token_obj['name'])}", parse_mode="HTML")
+            await msg.edit_text(
+                f"Processing account {i}/{len(active_tokens)}: {html.escape(token_obj['name'])}",
+                parse_mode="HTML"
+            )
             await unsubscribe_everyone(token_obj["token"], user_id=user_id)
-        await msg.edit_text(f"<b>Unsubscribe Complete</b>", parse_mode="HTML")
-
-    # --- Menus & Navigation ---
+            total += 1
+        await msg.edit_text(
+            f"<b>Unsubscribe Complete</b>\nSuccessfully unsubscribed {total} accounts.",
+            parse_mode="HTML"
+        )
     elif data == "send_request_menu":
-        await callback_query.message.edit_text("<b>Send Request Options</b>", reply_markup=send_request_markup, parse_mode="HTML")
+        await callback_query.message.edit_text(
+            "<b>Send Request Options</b>\n\nChoose your request type:",
+            reply_markup=send_request_markup,
+            parse_mode="HTML"
+        )
     elif data == "settings_menu":
-        await callback_query.message.edit_text("<b>Settings Menu</b>", reply_markup=await get_settings_menu(user_id), parse_mode="HTML")
+        await callback_query.message.edit_text(
+            "<b>Settings Menu</b>",
+            reply_markup=get_settings_menu(user_id),
+            parse_mode="HTML"
+        )
     elif data == "show_filters":
-        await callback_query.message.edit_text("<b>Filter Settings</b>", reply_markup=await get_meeff_filter_main_keyboard(user_id), parse_mode="HTML")
+        await callback_query.message.edit_text(
+            "<b>Filter Settings</b>\n\nConfigure your search preferences:",
+            reply_markup=get_meeff_filter_main_keyboard(user_id),
+            parse_mode="HTML"
+        )
+    elif data in ("toggle_request_filter", "meeff_filter_main") or data.startswith(("account_filter_", "account_gender_", "account_age_", "account_nationality_")):
+        await set_account_filter(callback_query)
     elif data == "manage_accounts":
         await show_manage_accounts_menu(callback_query)
-    elif data == "back_to_menu":
-        await callback_query.message.edit_text("<b>Meeff Bot Dashboard</b>", reply_markup=start_markup, parse_mode="HTML")
-
-    # --- Filters ---
-    elif data in ("toggle_request_filter", "meeff_filter_main") or data.startswith(("account_filter_", "account_gender_", "account_age_", "account_nationality_")):
-        await set_account_filter(callback_query) # This function must also be async now
-
-    # --- Account Management ---
     elif data.startswith("view_account_"):
         idx = int(data.split("_")[-1])
-        tokens = await get_tokens(user_id)
+        tokens = get_tokens(user_id)
         if 0 <= idx < len(tokens):
-            token_obj = tokens[idx]
-            token = token_obj["token"]
-            info_card = await get_info_card(user_id, token)
-            is_current = (await get_current_account(user_id)) == token
-            details = f"<b>Name:</b> <code>{html.escape(token_obj.get('name', 'N/A'))}</code>\n" \
-                      f"<b>Status:</b> {'Active' if token_obj.get('active', True) else 'Inactive'}\n" \
-                      f"<b>Current:</b> {'Yes' if is_current else 'No'}\n\n"
-            details += f"<b>Profile Info:</b>\n{info_card}" if info_card else "No profile card found."
-            await callback_query.message.edit_text(details, reply_markup=get_account_view_menu(idx), parse_mode="HTML", disable_web_page_preview=True)
+            token, token_obj = tokens[idx]["token"], tokens[idx]
+            info_card = get_info_card(user_id, token)
+            status_summary = (
+                f"<b>Account Status</b>\n━━━━━━━━━━━━━━━━━━━━\n<b>Name:</b> <code>{html.escape(token_obj.get('name', 'N/A'))}</code>\n"
+                f"<b>Status:</b> {'Active' if token_obj.get('active', True) else 'Inactive'}\n"
+                f"<b>Current Account:</b> {'Yes' if get_current_account(user_id) == token else 'No'}\n\n"
+            )
+            if info_card:
+                full_details = status_summary + "<b>Profile Information:</b>\n" + info_card
+                await callback_query.message.edit_text(
+                    full_details,
+                    reply_markup=get_account_view_menu(idx),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
+                )
+            else:
+                fallback_details = (
+                    f"<b>Account Details</b>\n━━━━━━━━━━━━━━━━━━━━\n<b>Name:</b> <code>{html.escape(token_obj.get('name', 'N/A'))}</code>\n"
+                    f"<b>Email:</b> <code>{html.escape(token_obj.get('email', 'N/A'))}</code>\n<b>Token:</b> <code>{html.escape(token)}</code>\n"
+                    f"<b>Status:</b> {'Active' if token_obj.get('active', True) else 'Inactive'}\n"
+                    f"<b>Current Account:</b> {'Yes' if get_current_account(user_id) == token else 'No'}\n\nNo profile card found."
+                )
+                await callback_query.message.edit_text(
+                    fallback_details,
+                    reply_markup=get_account_view_menu(idx),
+                    parse_mode="HTML"
+                )
+        else:
+            await callback_query.answer("Invalid account selected.")
     elif data.startswith("confirm_delete_"):
         idx = int(data.split("_")[-1])
-        tokens = await get_tokens(user_id)
+        tokens = get_tokens(user_id)
         if 0 <= idx < len(tokens):
             name = tokens[idx]["name"]
-            await callback_query.message.edit_text(f"<b>Confirm:</b> Delete <code>{html.escape(name)}</code>?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Yes, Delete", callback_data=f"delete_account_{idx}"), InlineKeyboardButton(text="Cancel", callback_data="manage_accounts")]]), parse_mode="HTML")
-    elif data.startswith("delete_account_"):
-        idx = int(data.split("_")[-1])
-        tokens = await get_tokens(user_id)
-        if 0 <= idx < len(tokens):
-            await delete_token(user_id, tokens[idx]["token"])
-            await callback_query.answer(f"Deleted {tokens[idx]['name']}")
-            await show_manage_accounts_menu(callback_query)
+            buttons = [
+                [
+                    InlineKeyboardButton(text="Yes, Delete", callback_data=f"delete_account_{idx}"),
+                    InlineKeyboardButton(text="Cancel", callback_data="manage_accounts")
+                ]
+            ]
+            await callback_query.message.edit_text(
+                f"<b>Confirm Deletion</b>\n\nDelete account <code>{html.escape(name)}</code>?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+                parse_mode="HTML"
+            )
+        else:
+            await callback_query.answer("Invalid account selected.")
     elif data.startswith("toggle_status_"):
         idx = int(data.split("_")[-1])
-        tokens = await get_tokens(user_id)
+        tokens = get_tokens(user_id)
         if 0 <= idx < len(tokens):
-            await toggle_token_status(user_id, tokens[idx]["token"])
-            await callback_query.answer(f"Toggled status for {tokens[idx]['name']}")
+            toggle_token_status(user_id, tokens[idx]["token"])
+            await callback_query.answer(f"Toggled status for {html.escape(tokens[idx]['name'])}")
             await show_manage_accounts_menu(callback_query)
-    elif data.startswith("set_account_"):
-        idx = int(data.split("_")[-1])
-        tokens = await get_tokens(user_id)
-        if 0 <= idx < len(tokens):
-            await set_current_account(user_id, tokens[idx]["token"])
-            await callback_query.answer(f"Set {tokens[idx]['name']} as current")
-            await show_manage_accounts_menu(callback_query)
-
-    # --- Spam Filter ---
+        else:
+            await callback_query.answer("Invalid account selected.")
     elif data == "spam_filter_menu":
-        await callback_query.message.edit_text("<b>Spam Filter Settings</b>", reply_markup=await get_spam_filter_menu(user_id), parse_mode="HTML")
+        await callback_query.message.edit_text(
+            "<b>Spam Filter Settings</b>\n\nControl filters for each feature.",
+            reply_markup=get_spam_filter_menu(user_id),
+            parse_mode="HTML"
+        )
     elif data.startswith("toggle_spam_"):
         filter_type = data.split("_")[-1]
         if filter_type == "all":
-            current_status = any((await get_all_spam_filters(user_id)).values())
-            new_status = not current_status
-            await asyncio.gather(*(set_individual_spam_filter(user_id, ft, new_status) for ft in ["chatroom", "request", "lounge"]))
-            await callback_query.answer(f"All filters set to {'ON' if new_status else 'OFF'}")
+            new_status = not any(get_all_spam_filters(user_id).values())
+            for ft in ["chatroom", "request", "lounge"]:
+                set_individual_spam_filter(user_id, ft, new_status)
+            await callback_query.answer(f"All spam filters turned {'ON' if new_status else 'OFF'}")
         elif filter_type in ["chatroom", "request", "lounge"]:
-            current_status = await get_individual_spam_filter(user_id, filter_type)
-            await set_individual_spam_filter(user_id, filter_type, not current_status)
-            await callback_query.answer(f"{filter_type.capitalize()} filter {'disabled' if current_status else 'enabled'}")
-        
-        # Refresh the menu
-        await callback_query.message.edit_text("<b>Spam Filter Settings</b>", reply_markup=await get_spam_filter_menu(user_id), parse_mode="HTML")
+            new_status = not get_individual_spam_filter(user_id, filter_type)
+            set_individual_spam_filter(user_id, filter_type, new_status)
+            await callback_query.answer(f"{filter_type.capitalize()} spam filter {'enabled' if new_status else 'disabled'}")
 
-    # --- Main Operations ---
+        new_callback_query = callback_query.model_copy(update={'data': 'spam_filter_menu'})
+        await callback_handler(new_callback_query)
+    elif data.startswith("set_account_"):
+        idx = int(data.split("_")[-1])
+        tokens = get_tokens(user_id)
+        if 0 <= idx < len(tokens):
+            set_current_account(user_id, tokens[idx]["token"])
+            await callback_query.answer(f"Set {html.escape(tokens[idx]['name'])} as current account")
+            await show_manage_accounts_menu(callback_query)
+        else:
+            await callback_query.answer("Invalid account selected.")
+    elif data.startswith("delete_account_"):
+        idx = int(data.split("_")[-1])
+        tokens = get_tokens(user_id)
+        if 0 <= idx < len(tokens):
+            name = tokens[idx]["name"]
+            delete_token(user_id, tokens[idx]["token"])
+            await callback_query.message.edit_text(
+                f"<b>Account Deleted:</b> <code>{html.escape(name)}</code>",
+                reply_markup=back_markup,
+                parse_mode="HTML"
+            )
+        else:
+            await callback_query.answer("Invalid account selected.")
+    elif data == "back_to_menu":
+        await callback_query.message.edit_text(
+            "<b>Meeff Bot Dashboard</b>",
+            reply_markup=start_markup,
+            parse_mode="HTML"
+        )
     elif data == "start":
-        if state.get("running"): return await callback_query.answer("Already running!")
+        if state.get("running"):
+            await callback_query.answer("Requests are already running!")
+            return
         state["running"] = True
-        msg = await callback_query.message.edit_text("<b>Initializing Requests...</b>", reply_markup=stop_markup, parse_mode="HTML")
+        msg = await callback_query.message.edit_text(
+            "<b>Initializing Requests</b>...",
+            reply_markup=stop_markup,
+            parse_mode="HTML"
+        )
         state.update({"status_message_id": msg.message_id, "pinned_message_id": msg.message_id})
         await bot.pin_chat_message(chat_id=user_id, message_id=msg.message_id)
         asyncio.create_task(run_requests(user_id, bot, TARGET_CHANNEL_ID))
         await callback_query.answer("Requests started!")
     elif data == "start_all":
-        if state.get("running"): return await callback_query.answer("Already running!")
-        tokens = await get_active_tokens(user_id)
-        if not tokens: return await callback_query.answer("No active tokens found.", show_alert=True)
+        if state.get("running"):
+            await callback_query.answer("Another request is already running!")
+            return
+        tokens = get_active_tokens(user_id)
+        if not tokens:
+            await callback_query.answer("No active tokens found.", show_alert=True)
+            return
         state["running"] = True
-        msg = await callback_query.message.edit_text(f"<b>Starting Multi-Account Requests ({len(tokens)})...</b>", reply_markup=stop_markup, parse_mode="HTML")
+        msg = await callback_query.message.edit_text(
+            f"<b>Starting Multi-Account Requests</b> ({len(tokens)})...",
+            reply_markup=stop_markup,
+            parse_mode="HTML"
+        )
         state.update({"status_message_id": msg.message_id, "pinned_message_id": msg.message_id})
         await bot.pin_chat_message(chat_id=user_id, message_id=msg.message_id)
         asyncio.create_task(process_all_tokens(user_id, tokens, bot, TARGET_CHANNEL_ID))
-        await callback_query.answer("Multi-account requests started!")
+        await callback_query.answer("Multi-account processing started!")
     elif data == "stop":
-        if not state.get("running"): return await callback_query.answer("Not running!")
+        if not state.get("running"):
+            await callback_query.answer("Requests are not running!")
+            return
         state["running"], state["stopped"] = False, True
-        await callback_query.message.edit_text(f"<b>Requests Stopping...</b>", parse_mode="HTML")
-        await callback_query.answer("Stopping process.")
+        await callback_query.message.edit_text(
+            f"<b>Requests Stopped.</b>\nTotal Added: <code>{state.get('total_added_friends', 0)}</code>",
+            reply_markup=start_markup,
+            parse_mode="HTML"
+        )
+        await callback_query.answer("Requests stopped.")
         if state.get("pinned_message_id"):
-            try: await bot.unpin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
-            except Exception: pass
+            await bot.unpin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
     elif data == "all_countries":
-        if state.get("running"): return await callback_query.answer("Already running!")
+        if state.get("running"):
+            await callback_query.answer("Another process is already running!")
+            return
         state["running"] = True
-        msg = await callback_query.message.edit_text("<b>Starting All Countries...</b>", reply_markup=stop_markup, parse_mode="HTML")
-        state.update({"status_message_id": msg.message_id, "pinned_message_id": msg.message_id})
+        msg = await callback_query.message.edit_text(
+            "<b>Starting All Countries Feature</b>...",
+            reply_markup=stop_markup,
+            parse_mode="HTML"
+        )
+        state.update({"status_message_id": msg.message_id, "pinned_message_id": msg.message_id, "stop_markup": stop_markup})
         await bot.pin_chat_message(chat_id=user_id, message_id=msg.message_id)
         asyncio.create_task(run_all_countries(user_id, state, bot, get_current_account))
         await callback_query.answer("All Countries feature started!")
@@ -620,17 +907,17 @@ async def callback_handler(callback_query: CallbackQuery) -> None:
 async def set_bot_commands() -> None:
     """Set the bot's command menu."""
     commands = [
-        BotCommand(command="start", description="Start the bot & show dashboard"),
-        BotCommand(command="settings", description="Manage accounts, filters, and DB"),
-        BotCommand(command="lounge", description="Send msg to lounge (current acc)"),
-        BotCommand(command="send_lounge_all", description="Send lounge msg (all accs)"),
-        BotCommand(command="chatroom", description="Send msg to chats (current acc)"),
-        BotCommand(command="send_chat_all", description="Send msg to chats (all accs)"),
-        BotCommand(command="invoke", description="Remove disabled/invalid accounts"),
+        BotCommand(command="start", description="Start the bot"),
+        BotCommand(command="lounge", description="Send message in the lounge"),
+        BotCommand(command="send_lounge_all", description="Send lounge message to all accounts"),
+        BotCommand(command="chatroom", description="Send message in chatrooms"),
+        BotCommand(command="send_chat_all", description="Send chatroom message to all accounts"),
+        BotCommand(command="invoke", description="Remove disabled accounts"),
         BotCommand(command="skip", description="Unsubscribe from chats"),
-        BotCommand(command="add", description="Add a user by their ID"),
-        BotCommand(command="signup", description="Create a new Meeff account"),
-        BotCommand(command="password", description="Enter password for temporary access")
+        BotCommand(command="settings", description="Bot settings"),
+        BotCommand(command="add", description="Add a person by ID"),
+        BotCommand(command="signup", description="Create a Meeff account"),
+        BotCommand(command="password", description="Enter password for access")
     ]
     await bot.set_my_commands(commands)
 
@@ -642,7 +929,7 @@ async def main() -> None:
         logger.info("Starting bot polling...")
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Failed to start bot:", exc_info=True)
+        logger.error(f"Failed to start bot: {e}")
         raise
 
 if __name__ == "__main__":

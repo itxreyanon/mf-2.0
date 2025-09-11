@@ -1,71 +1,85 @@
-import asyncio
+from pymongo import MongoClient
 import datetime
-from motor.motor_asyncio import AsyncIOMotorClient
 
-# Connect using the async client. This single client will manage connection pools.
-client = AsyncIOMotorClient("mongodb+srv://irexanon:xUf7PCf9cvMHy8g6@rexdb.d9rwo.mongodb.net/?retryWrites=true&w=majority&appName=RexDB")
+# MongoDB connection
+client = MongoClient("mongodb+srv://irexanon:xUf7PCf9cvMHy8g6@rexdb.d9rwo.mongodb.net/?retryWrites=true&w=majority&appName=RexDB")
 db = client.meeff_bot
 
+# Helper function to get a user's collection
 def _get_user_collection(telegram_user_id):
-    """Helper to get the collection for a user."""
-    return db[f"user_{telegram_user_id}"]
+    """Get the collection for a user"""
+    collection_name = f"user_{telegram_user_id}"
+    return db[collection_name]
 
-async def _ensure_user_collection_exists(telegram_user_id):
-    """Make sure user collection exists with default documents. Now async."""
+# Helper function to ensure collection exists with basic structure
+def _ensure_user_collection_exists(telegram_user_id):
+    """Make sure user collection exists with default documents"""
     user_db = _get_user_collection(telegram_user_id)
-    if await user_db.count_documents({}) == 0:
-        # Use asyncio.gather to run all initial inserts concurrently for speed
-        await asyncio.gather(
-            user_db.insert_one({"type": "metadata", "created_at": datetime.datetime.utcnow(), "user_id": telegram_user_id}),
-            user_db.insert_one({"type": "tokens", "items": []}),
-            user_db.insert_one({"type": "settings", "current_token": None, "spam_filter": False}),
-            user_db.insert_one({"type": "sent_records", "data": {}}),
-            user_db.insert_one({"type": "filters", "data": {}}),
-            user_db.insert_one({"type": "info_cards", "data": {}})
-        )
+    
+    # Check if the collection is empty
+    if user_db.count_documents({}) == 0:
+        # Initialize with basic structure
+        user_db.insert_one({"type": "metadata", "created_at": datetime.datetime.utcnow(), "user_id": telegram_user_id})
+        user_db.insert_one({"type": "tokens", "items": []})
+        user_db.insert_one({"type": "settings", "current_token": None, "spam_filter": False})
+        user_db.insert_one({"type": "sent_records", "data": {}})
+        user_db.insert_one({"type": "filters", "data": {}})
+        user_db.insert_one({"type": "info_cards", "data": {}})
     return True
 
-async def list_all_collections():
-    """List all user collections with detailed data summary. Now async."""
-    collection_names = await db.list_collection_names()
+# Enhanced DB Collection Management Functions
+def list_all_collections():
+    """List all user collections with detailed data summary"""
+    collection_names = db.list_collection_names()
     user_collections = []
     
-    collections_to_process = [name for name in collection_names if name.startswith("user_") and name != "user_"]
-    
-    # Run summary tasks in parallel for better performance
-    summaries = await asyncio.gather(*(get_collection_summary(name) for name in collections_to_process))
-
-    for name, summary in zip(collections_to_process, summaries):
-        try:
-            user_id = name[5:]  # Remove "user_" prefix
-            user_collections.append({
-                "collection_name": name, "user_id": user_id,
-                "display_name": f"user_{user_id}", "summary": summary
-            })
-        except Exception as e:
-            print(f"Error processing collection {name}: {e}")
-            continue
+    for name in collection_names:
+        if name.startswith("user_") and name != "user_":
+            try:
+                user_id = name[5:]  # Remove "user_" prefix
+                summary = get_collection_summary(name)
+                user_collections.append({
+                    "collection_name": name,
+                    "user_id": user_id,
+                    "display_name": f"user_{user_id}",
+                    "summary": summary
+                })
+            except Exception as e:
+                print(f"Error processing collection {name}: {e}")
+                continue
     
     return sorted(user_collections, key=lambda x: x.get("summary", {}).get("created_at") or datetime.datetime.min, reverse=True)
 
-async def get_collection_summary(collection_name):
-    """Get a detailed summary of data in a collection. Now async."""
+def get_collection_summary(collection_name):
+    """Get a detailed summary of data in a collection using a single efficient query."""
     try:
         collection = db[collection_name]
-        query_types = ["tokens", "sent_records", "info_cards", "settings", "metadata"]
-        # A motor cursor must be awaited to fetch the data
-        all_docs = await collection.find({"type": {"$in": query_types}}).to_list(length=None)
         
+        # --- THE FIX IS HERE ---
+        # Instead of 5 separate database calls, we fetch all documents in one trip.
+        query_types = ["tokens", "sent_records", "info_cards", "settings", "metadata"]
+        all_docs = list(collection.find({"type": {"$in": query_types}}))
+        
+        # Create a dictionary to easily access documents by their type
         docs_by_type = {doc.get("type"): doc for doc in all_docs}
+
+        # Now, get each document from our pre-fetched dictionary (no new DB calls)
         tokens_doc = docs_by_type.get("tokens", {})
         sent_doc = docs_by_type.get("sent_records", {})
         info_doc = docs_by_type.get("info_cards", {})
         settings_doc = docs_by_type.get("settings", {})
         metadata_doc = docs_by_type.get("metadata", {})
         
-        tokens_count = len(tokens_doc.get("items", [])) if tokens_doc else 0
-        active_tokens = sum(1 for t in tokens_doc.get("items", []) if t.get("active", True)) if tokens_doc else 0
+        # --- The rest of the logic remains the same, but it's now much faster ---
+
+        # Get tokens count and details
+        tokens_count = 0
+        active_tokens = 0
+        if tokens_doc and "items" in tokens_doc:
+            tokens_count = len(tokens_doc["items"])
+            active_tokens = sum(1 for token in tokens_doc["items"] if token.get("active", True))
         
+        # Get sent records count by category
         sent_records = {"total": 0, "categories": {}}
         if sent_doc and "data" in sent_doc:
             for category, ids in sent_doc["data"].items():
@@ -73,290 +87,577 @@ async def get_collection_summary(collection_name):
                 sent_records["categories"][category] = count
                 sent_records["total"] += count
         
+        # Get info cards count
         info_cards_count = len(info_doc.get("data", {})) if info_doc else 0
-        current_token = settings_doc.get("current_token")
-        spam_filter = settings_doc.get("spam_filter", False)
-        created_at = metadata_doc.get("created_at")
         
-        total_documents = await collection.count_documents({})
+        # Get settings
+        current_token = settings_doc.get("current_token") if settings_doc else None
+        spam_filter = settings_doc.get("spam_filter", False) if settings_doc else False
+        
+        # Get creation date
+        created_at = metadata_doc.get("created_at") if metadata_doc else None
         
         return {
-            "tokens_count": tokens_count, "active_tokens": active_tokens, "sent_records": sent_records,
-            "info_cards_count": info_cards_count, "has_current_token": bool(current_token),
+            "tokens_count": tokens_count,
+            "active_tokens": active_tokens,
+            "sent_records": sent_records,
+            "info_cards_count": info_cards_count,
+            "has_current_token": bool(current_token),
             "current_token_preview": current_token[:10] + "..." if current_token else None,
-            "spam_filter_enabled": spam_filter, "created_at": created_at, "total_documents": total_documents
+            "spam_filter_enabled": spam_filter,
+            "created_at": created_at,
+            "total_documents": collection.count_documents({})
         }
     except Exception as e:
         return {"error": str(e)}
 
-async def connect_to_collection(collection_name, target_user_id):
+def connect_to_collection(collection_name, target_user_id):
+    """Connect to existing collection by transferring all data"""
     try:
-        if collection_name not in await db.list_collection_names():
+        # Check if source collection exists
+        if collection_name not in db.list_collection_names():
             return False, f"Collection '{collection_name}' not found"
-        await _ensure_user_collection_exists(target_user_id)
-        from_collection, to_collection = db[collection_name], _get_user_collection(target_user_id)
-        all_docs = await from_collection.find({}).to_list(length=None)
-        if not all_docs: return False, "Source collection is empty"
-        await to_collection.delete_many({})
+        
+        # Ensure target collection exists
+        _ensure_user_collection_exists(target_user_id)
+        
+        from_collection = db[collection_name]
+        to_collection = _get_user_collection(target_user_id)
+        
+        # Get all documents from source collection
+        all_docs = list(from_collection.find({}))
+        
+        if not all_docs:
+            return False, "Source collection is empty"
+        
+        # Clear target collection first
+        to_collection.delete_many({})
+        
+        # Update metadata for target collection
         for doc in all_docs:
             if doc.get("type") == "metadata":
-                doc.update({"user_id": target_user_id, "connected_at": datetime.datetime.utcnow(), "original_collection": collection_name})
-        await to_collection.insert_many(all_docs)
-        return True, f"Successfully connected to '{collection_name}'"
-    except Exception as e: return False, f"Connection failed: {e}"
+                doc["user_id"] = target_user_id
+                doc["connected_at"] = datetime.datetime.utcnow()
+                doc["original_collection"] = collection_name
+        
+        # Insert all documents to target collection
+        to_collection.insert_many(all_docs)
+        
+        return True, f"Successfully connected to '{collection_name}' with {len(all_docs)} documents"
+        
+    except Exception as e:
+        return False, f"Connection failed: {str(e)}"
 
-async def rename_user_collection(user_id, new_collection_name):
+def rename_user_collection(user_id, new_collection_name):
+    """Rename a user's collection"""
     try:
         old_collection_name = f"user_{user_id}"
-        if old_collection_name not in await db.list_collection_names(): return False, "Your collection not found"
-        if not new_collection_name.startswith("user_"): new_collection_name = f"user_{new_collection_name}"
-        if new_collection_name in await db.list_collection_names(): return False, "Target name already exists"
         
+        # Check if old collection exists
+        if old_collection_name not in db.list_collection_names():
+            return False, "Your collection not found"
+        
+        # Validate new collection name
+        if not new_collection_name.startswith("user_"):
+            new_collection_name = f"user_{new_collection_name}"
+        
+        # Check if new collection name already exists
+        if new_collection_name in db.list_collection_names():
+            return False, "Target collection name already exists"
+        
+        # Get all documents from old collection
         old_collection = db[old_collection_name]
-        all_docs = await old_collection.find({}).to_list(length=None)
-        if not all_docs: return False, "Your collection is empty"
+        all_docs = list(old_collection.find({}))
         
+        if not all_docs:
+            return False, "Your collection is empty"
+        
+        # Create new collection and insert documents
+        new_collection = db[new_collection_name]
+        
+        # Update metadata
         for doc in all_docs:
             if doc.get("type") == "metadata":
-                doc.update({"renamed_at": datetime.datetime.utcnow(), "original_name": old_collection_name})
+                doc["renamed_at"] = datetime.datetime.utcnow()
+                doc["original_name"] = old_collection_name
         
-        new_collection = db[new_collection_name]
-        await new_collection.insert_many(all_docs)
-        await old_collection.drop()
+        new_collection.insert_many(all_docs)
+        
+        # Delete old collection
+        old_collection.drop()
+        
         return True, f"Successfully renamed to '{new_collection_name}'"
-    except Exception as e: return False, f"Rename failed: {e}"
+        
+    except Exception as e:
+        return False, f"Rename failed: {str(e)}"
 
-async def transfer_to_user(from_user_id, to_user_id):
+def transfer_to_user(from_user_id, to_user_id):
+    """Transfer all data from one user to another"""
     try:
         from_collection_name = f"user_{from_user_id}"
-        if from_collection_name not in await db.list_collection_names(): return False, "Your collection not found"
-        await _ensure_user_collection_exists(to_user_id)
-        from_collection, to_collection = db[from_collection_name], _get_user_collection(to_user_id)
-        all_docs = await from_collection.find({}).to_list(length=None)
-        if not all_docs: return False, "Your collection is empty"
-        await to_collection.delete_many({})
+        
+        # Check if source collection exists
+        if from_collection_name not in db.list_collection_names():
+            return False, "Your collection not found"
+        
+        # Ensure target collection exists
+        _ensure_user_collection_exists(to_user_id)
+        
+        from_collection = db[from_collection_name]
+        to_collection = _get_user_collection(to_user_id)
+        
+        # Get all documents from source collection
+        all_docs = list(from_collection.find({}))
+        
+        if not all_docs:
+            return False, "Your collection is empty"
+        
+        # Clear target collection first
+        to_collection.delete_many({})
+        
+        # Update metadata for target collection
         for doc in all_docs:
             if doc.get("type") == "metadata":
-                doc.update({"user_id": to_user_id, "transferred_at": datetime.datetime.utcnow(), "transferred_from": from_user_id})
-        await to_collection.insert_many(all_docs)
-        return True, f"Successfully transferred data to user {to_user_id}"
-    except Exception as e: return False, f"Transfer failed: {e}"
+                doc["user_id"] = to_user_id
+                doc["transferred_at"] = datetime.datetime.utcnow()
+                doc["transferred_from"] = from_user_id
+        
+        # Insert all documents to target collection
+        to_collection.insert_many(all_docs)
+        
+        return True, f"Successfully transferred {len(all_docs)} documents to user {to_user_id}"
+        
+    except Exception as e:
+        return False, f"Transfer failed: {str(e)}"
 
-async def get_current_collection_info(user_id):
+def get_current_collection_info(user_id):
+    """Get current user's collection information"""
     collection_name = f"user_{user_id}"
-    if collection_name in await db.list_collection_names():
-        return {"collection_name": collection_name, "exists": True, "summary": await get_collection_summary(collection_name)}
-    return {"collection_name": collection_name, "exists": False, "summary": None}
+    if collection_name in db.list_collection_names():
+        summary = get_collection_summary(collection_name)
+        return {
+            "collection_name": collection_name,
+            "exists": True,
+            "summary": summary
+        }
+    else:
+        return {
+            "collection_name": collection_name,
+            "exists": False,
+            "summary": None
+        }
 
-async def set_info_card(telegram_user_id, token, info_text, email=None):
-    await _ensure_user_collection_exists(telegram_user_id)
+# Info card functions
+def set_info_card(telegram_user_id, token, info_text, email=None):
+    """Store info card for a token"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
     user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one(
+    user_db.update_one(
         {"type": "info_cards"},
         {"$set": {f"data.{token}": {"info": info_text, "email": email, "updated_at": datetime.datetime.utcnow()}}},
-        upsert=True)
+        upsert=True
+    )
     return True
 
-async def get_info_card(telegram_user_id, token):
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
-    cards_doc = await user_db.find_one({"type": "info_cards"})
-    return cards_doc.get("data", {}).get(token, {}).get("info") if cards_doc else None
-
-async def set_token(telegram_user_id, token, meeff_user_id, email=None, filters=None):
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
-    tokens_doc = await user_db.find_one({"type": "tokens"})
-    tokens = tokens_doc.get("items", []) if tokens_doc else []
+def get_info_card(telegram_user_id, token):
+    """Get info card for a token"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return None
     
+    user_db = _get_user_collection(telegram_user_id)
+    cards_doc = user_db.find_one({"type": "info_cards"})
+    if cards_doc and "data" in cards_doc and token in cards_doc["data"]:
+        return cards_doc["data"][token].get("info")
+    return None
+
+# Set or update token for a user
+def set_token(telegram_user_id, token, meeff_user_id, email=None, filters=None):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
+    user_db = _get_user_collection(telegram_user_id)
+
+    # Get current tokens
+    tokens_doc = user_db.find_one({"type": "tokens"})
+    tokens = tokens_doc.get("items", []) if tokens_doc else []
+
+    # Check if token exists
     token_exists = False
-    for t in tokens:
+    for i, t in enumerate(tokens):
         if t.get("token") == token:
-            t.update({"name": meeff_user_id})
-            if email: t["email"] = email
-            if filters: t["filters"] = filters
-            t.setdefault("active", True)
+            # Update existing token
+            tokens[i]["name"] = meeff_user_id
+            if email:
+                tokens[i]["email"] = email
+            if filters:
+                tokens[i]["filters"] = filters
+            # Keep existing active status or default to True
+            if "active" not in tokens[i]:
+                tokens[i]["active"] = True
             token_exists = True
             break
-    
+
+    # Add new token if not exists
     if not token_exists:
         token_data = {"token": token, "name": meeff_user_id, "active": True}
-        if email: token_data["email"] = email
-        if filters: token_data["filters"] = filters
+        if email:
+            token_data["email"] = email
+        if filters:
+            token_data["filters"] = filters
         tokens.append(token_data)
-        
-    await user_db.update_one({"type": "tokens"}, {"$set": {"items": tokens}}, upsert=True)
+
+    # Update tokens in database
+    user_db.update_one(
+        {"type": "tokens"},
+        {"$set": {"items": tokens}},
+        upsert=True
+    )
     return True
 
-async def toggle_token_status(telegram_user_id, token):
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
-    result = await user_db.find_one({"type": "tokens"})
-    if not result: return False
+# Add new functions to toggle token active status
+def toggle_token_status(telegram_user_id, token):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
     
-    tokens = result.get("items", [])
-    for t in tokens:
+    user_db = _get_user_collection(telegram_user_id)
+
+    # Get current tokens
+    tokens_doc = user_db.find_one({"type": "tokens"})
+    if not tokens_doc:
+        return False
+
+    tokens = tokens_doc.get("items", [])
+    status_changed = False
+
+    # Find and toggle the token's active status
+    for i, t in enumerate(tokens):
         if t.get("token") == token:
-            t["active"] = not t.get("active", True)
-            await user_db.update_one({"type": "tokens"}, {"$set": {"items": tokens}})
-            return True
+            current_status = t.get("active", True)
+            tokens[i]["active"] = not current_status
+            status_changed = True
+            break
+
+    if status_changed:
+        # Update tokens in database
+        user_db.update_one(
+            {"type": "tokens"},
+            {"$set": {"items": tokens}}
+        )
+        return True
     return False
 
-async def set_account_active(telegram_user_id, token, active_status):
-    await _ensure_user_collection_exists(telegram_user_id)
+def set_account_active(telegram_user_id, token, active_status):
+    """Set account active/inactive status"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
     user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one(
-        {"type": "tokens", "items.token": token},
-        {"$set": {"items.$.active": active_status}}
+    tokens_doc = user_db.find_one({"type": "tokens"})
+    if not tokens_doc:
+        return False
+
+    tokens = tokens_doc.get("items", [])
+    for i, t in enumerate(tokens):
+        if t.get("token") == token:
+            tokens[i]["active"] = active_status
+            break
+
+    user_db.update_one(
+        {"type": "tokens"},
+        {"$set": {"items": tokens}}
     )
     return True
 
-async def get_active_tokens(telegram_user_id):
-    await _ensure_user_collection_exists(telegram_user_id)
+# Add function to get active tokens only
+def get_active_tokens(telegram_user_id):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return []
+    
     user_db = _get_user_collection(telegram_user_id)
-    tokens_doc = await user_db.find_one({"type": "tokens"})
-    if not tokens_doc: return []
+
+    tokens_doc = user_db.find_one({"type": "tokens"})
+    if not tokens_doc:
+        return []
+
+    # Filter tokens that are active (or where active field doesn't exist)
     return [t for t in tokens_doc.get("items", []) if t.get("active", True)]
 
-async def get_token_status(telegram_user_id, token):
-    await _ensure_user_collection_exists(telegram_user_id)
+# Add function to get token status
+def get_token_status(telegram_user_id, token):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return None
+    
     user_db = _get_user_collection(telegram_user_id)
-    tokens_doc = await user_db.find_one({"type": "tokens"})
+
+    tokens_doc = user_db.find_one({"type": "tokens"})
     if tokens_doc:
         for t in tokens_doc.get("items", []):
-            if t.get("token") == token: return t.get("active", True)
+            if t.get("token") == token:
+                return t.get("active", True)
     return None
 
-async def get_tokens(telegram_user_id):
-    await _ensure_user_collection_exists(telegram_user_id)
+# Get all tokens for a user
+def get_tokens(telegram_user_id):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return []
+    
     user_db = _get_user_collection(telegram_user_id)
-    tokens_doc = await user_db.find_one({"type": "tokens"})
+    tokens_doc = user_db.find_one({"type": "tokens"})
     return tokens_doc.get("items", []) if tokens_doc else []
 
-get_all_tokens = get_tokens  # Alias for compatibility
+def get_all_tokens(telegram_user_id):
+    """Alias for get_tokens for compatibility"""
+    return get_tokens(telegram_user_id)
 
-async def list_tokens():
+# List all tokens in the database
+def list_tokens():
     result = []
-    collection_names = await db.list_collection_names()
-    for name in [n for n in collection_names if n.startswith("user_")]:
-        user_id = name.split("_", 1)[1]
-        tokens_doc = await db[name].find_one({"type": "tokens"})
+    # Get all collection names
+    collection_names = db.list_collection_names()
+
+    # Filter for user collections
+    user_collections = [name for name in collection_names if name.startswith("user_")]
+
+    for collection_name in user_collections:
+        user_id = collection_name.split("_", 1)[1]  # Extract user ID from collection name
+        user_db = db[collection_name]
+
+        tokens_doc = user_db.find_one({"type": "tokens"})
         if tokens_doc:
             for token in tokens_doc.get("items", []):
-                result.append({"user_id": user_id, "token": token.get("token"), "name": token.get("name")})
+                result.append({
+                    "user_id": user_id,
+                    "token": token.get("token"),
+                    "name": token.get("name")
+                })
+
     return result
 
-async def set_current_account(telegram_user_id, token):
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one({"type": "settings"}, {"$set": {"current_token": token}}, upsert=True)
-    return True
-
-async def get_current_account(telegram_user_id):
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
-    settings = await user_db.find_one({"type": "settings"})
-    return settings.get("current_token") if settings else None
-
-async def delete_token(telegram_user_id, token):
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
+# Set current account token for a user
+def set_current_account(telegram_user_id, token):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
     
-    # Atomically pull the token from the items array
-    await user_db.update_one({"type": "tokens"}, {"$pull": {"items": {"token": token}}})
-    
-    # Unset current token if it was the one deleted
-    await user_db.update_one({"type": "settings", "current_token": token}, {"$set": {"current_token": None}})
-    
-    # Also delete info card
-    await user_db.update_one({"type": "info_cards"}, {"$unset": {f"data.{token}": ""}})
-    return True
-
-async def set_user_filters(telegram_user_id, token, filters):
-    await _ensure_user_collection_exists(telegram_user_id)
     user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one(
-        {"type": "tokens", "items.token": token},
-        {"$set": {"items.$.filters": filters}}
+
+    user_db.update_one(
+        {"type": "settings"},
+        {"$set": {"current_token": token}},
+        upsert=True
     )
     return True
 
-async def get_user_filters(telegram_user_id, token):
-    await _ensure_user_collection_exists(telegram_user_id)
+# Get current account token for a user
+def get_current_account(telegram_user_id):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return None
+    
     user_db = _get_user_collection(telegram_user_id)
-    doc = await user_db.find_one({"type": "tokens", "items.token": token}, {"items.$": 1})
-    if doc and doc.get("items"):
-        return doc["items"][0].get("filters")
+
+    settings = user_db.find_one({"type": "settings"})
+    return settings.get("current_token") if settings else None
+
+# Delete a token for a user
+def delete_token(telegram_user_id, token):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
+    user_db = _get_user_collection(telegram_user_id)
+
+    # Get current tokens and filter out the one to delete
+    tokens_doc = user_db.find_one({"type": "tokens"})
+    if tokens_doc:
+        tokens = tokens_doc.get("items", [])
+        updated_tokens = [t for t in tokens if t.get("token") != token]
+
+        # Update tokens in database
+        user_db.update_one(
+            {"type": "tokens"},
+            {"$set": {"items": updated_tokens}}
+        )
+
+    # Check if this was the current token
+    settings = user_db.find_one({"type": "settings"})
+    if settings and settings.get("current_token") == token:
+        user_db.update_one(
+            {"type": "settings"},
+            {"$set": {"current_token": None}}
+        )
+    
+    # Also delete info card
+    user_db.update_one(
+        {"type": "info_cards"},
+        {"$unset": {f"data.{token}": ""}}
+    )
+    return True
+
+# Set filters for a specific user and token
+def set_user_filters(telegram_user_id, token, filters):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
+    user_db = _get_user_collection(telegram_user_id)
+
+    # Get current tokens
+    tokens_doc = user_db.find_one({"type": "tokens"})
+    tokens = tokens_doc.get("items", []) if tokens_doc else []
+
+    # Update the token's filters
+    for i, t in enumerate(tokens):
+        if t.get("token") == token:
+            tokens[i]["filters"] = filters
+            break
+
+    # Update tokens in database
+    user_db.update_one(
+        {"type": "tokens"},
+        {"$set": {"items": tokens}}
+    )
+    return True
+
+# Get filters for a specific user and token
+def get_user_filters(telegram_user_id, token):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return None
+    
+    user_db = _get_user_collection(telegram_user_id)
+
+    tokens_doc = user_db.find_one({"type": "tokens"})
+    if tokens_doc:
+        for t in tokens_doc.get("items", []):
+            if t.get("token") == token:
+                return t.get("filters")
     return None
 
-async def set_spam_filter(telegram_user_id, status: bool):
-    await _ensure_user_collection_exists(telegram_user_id)
+# Enable or disable spam filter for a user
+def set_spam_filter(telegram_user_id, status: bool):
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
     user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one({"type": "settings"}, {"$set": {"spam_filter": status}}, upsert=True)
+
+    user_db.update_one(
+        {"type": "settings"},
+        {"$set": {"spam_filter": status}},
+        upsert=True
+    )
     return True
 
-async def set_individual_spam_filter(telegram_user_id, filter_type: str, status: bool):
-    await _ensure_user_collection_exists(telegram_user_id)
+# Set individual spam filter for specific features
+def set_individual_spam_filter(telegram_user_id, filter_type: str, status: bool):
+    """Set spam filter for individual features: chatroom, request, lounge"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
     user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one({"type": "settings"}, {"$set": {f"spam_filter_{filter_type}": status}}, upsert=True)
+    user_db.update_one(
+        {"type": "settings"},
+        {"$set": {f"spam_filter_{filter_type}": status}},
+        upsert=True
+    )
     return True
 
-async def get_individual_spam_filter(telegram_user_id: int, filter_type: str) -> bool:
-    await _ensure_user_collection_exists(telegram_user_id)
-    settings = await _get_user_collection(telegram_user_id).find_one({"type": "settings"})
+# Get individual spam filter status
+def get_individual_spam_filter(telegram_user_id: int, filter_type: str) -> bool:
+    """Get spam filter status for individual features: chatroom, request, lounge"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
+    user_db = _get_user_collection(telegram_user_id)
+    settings = user_db.find_one({"type": "settings"})
     return settings.get(f"spam_filter_{filter_type}", False) if settings else False
 
-async def get_all_spam_filters(telegram_user_id: int) -> dict:
-    await _ensure_user_collection_exists(telegram_user_id)
-    settings = await _get_user_collection(telegram_user_id).find_one({"type": "settings"})
-    if not settings: return {"chatroom": False, "request": False, "lounge": False}
+# Get all spam filter settings
+def get_all_spam_filters(telegram_user_id: int) -> dict:
+    """Get all spam filter settings"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return {"chatroom": False, "request": False, "lounge": False}
+    
+    user_db = _get_user_collection(telegram_user_id)
+    settings = user_db.find_one({"type": "settings"})
+    if not settings:
+        return {"chatroom": False, "request": False, "lounge": False}
+    
     return {
         "chatroom": settings.get("spam_filter_chatroom", False),
         "request": settings.get("spam_filter_request", False),
         "lounge": settings.get("spam_filter_lounge", False)
     }
+# Get spam filter status for a user
 
-async def get_spam_filter(telegram_user_id: int) -> bool:
-    await _ensure_user_collection_exists(telegram_user_id)
-    settings = await _get_user_collection(telegram_user_id).find_one({"type": "settings"})
+
+def get_spam_filter(telegram_user_id: int) -> bool:
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
+    user_db = _get_user_collection(telegram_user_id)
+
+    settings = user_db.find_one({"type": "settings"})
     return settings.get("spam_filter", False) if settings else False
 
-async def get_already_sent_ids(telegram_user_id, category):
-    await _ensure_user_collection_exists(telegram_user_id)
+# Get all target IDs for a category for a user
+def get_already_sent_ids(telegram_user_id, category):
+    """Fetch all target_ids for a given user and category."""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return set()
+    
     user_db = _get_user_collection(telegram_user_id)
-    records_doc = await user_db.find_one({"type": "sent_records"}, {f"data.{category}": 1})
+    records_doc = user_db.find_one({"type": "sent_records"}, {"data." + category: 1})
     if records_doc and "data" in records_doc and category in records_doc["data"]:
         return set(records_doc["data"][category])
     return set()
 
-async def add_sent_id(telegram_user_id, category, target_id):
-    await _ensure_user_collection_exists(telegram_user_id)
+# Record that we've sent a message/request to a target
+def add_sent_id(telegram_user_id, category, target_id):
+    """Record a target_id as sent for a user and category."""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
     user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one(
+    user_db.update_one(
         {"type": "sent_records"},
         {"$addToSet": {f"data.{category}": target_id}},
         upsert=True
     )
     return True
 
+# Check if we've already sent to this target
 async def is_already_sent(telegram_user_id, category, target_id, bulk=False):
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
-    records_doc = await user_db.find_one({"type": "sent_records"}, {f"data.{category}": 1})
-    
-    if not (records_doc and "data" in records_doc and category in records_doc["data"]):
+    """Check if target_id(s) have already been recorded as sent"""
+    if not _ensure_user_collection_exists(telegram_user_id):
         return False if not bulk else set()
-
-    sent_ids = set(records_doc["data"][category])
+    
+    user_db = _get_user_collection(telegram_user_id)
+    
     if not bulk:
-        return target_id in sent_ids
-    return sent_ids
+        # Single ID check
+        records_doc = user_db.find_one({"type": "sent_records"}, {f"data.{category}": 1})
+        if records_doc and "data" in records_doc and category in records_doc["data"]:
+            sent_ids = records_doc["data"][category]
+            if isinstance(sent_ids, (list, set)):
+                return target_id in sent_ids
+        return False
+    else:
+        # Bulk check - returns set of existing IDs
+        records_doc = user_db.find_one({"type": "sent_records"}, {f"data.{category}": 1})
+        if records_doc and "data" in records_doc and category in records_doc["data"]:
+            existing_ids = records_doc["data"][category]
+            if isinstance(existing_ids, (list, set)):
+                return set(existing_ids)
+        return set()
 
 async def bulk_add_sent_ids(telegram_user_id, category, target_ids):
-    if not target_ids: return False
-    await _ensure_user_collection_exists(telegram_user_id)
+    """Record multiple target_ids as sent for a user and category"""
+    if not target_ids:
+        return False
+    
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+        
     user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one(
+    user_db.update_one(
         {"type": "sent_records"},
         {"$addToSet": {f"data.{category}": {"$each": list(target_ids)}}},
         upsert=True
@@ -364,28 +665,96 @@ async def bulk_add_sent_ids(telegram_user_id, category, target_ids):
     return True
 
 async def has_valid_access(telegram_user_id):
+    """Check if user has valid access to use the bot"""
     collection_name = f"user_{telegram_user_id}"
-    if collection_name not in await db.list_collection_names(): return False
-    return await db[collection_name].count_documents({"type": "metadata"}) > 0
-
-async def add_used_email_variation(telegram_user_id, base_email, variation):
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one(
-        {"type": "email_variations"},
-        {"$addToSet": {f"data.{base_email}": variation}},
-        upsert=True)
+    if collection_name not in db.list_collection_names():
+        return False
+    
+    user_db = db[collection_name]
+    # Check if collection exists and has basic structure
+    if user_db.count_documents({"type": "metadata"}) == 0:
+        return False
     return True
 
-async def get_used_email_variations(telegram_user_id, base_email):
-    await _ensure_user_collection_exists(telegram_user_id)
+def get_message_delay(telegram_user_id):
+    # Return the delay in seconds for this user
+    # You could store this in your database
+    return 2  # Default 2 second delay
+
+# Email variations management
+def add_used_email_variation(telegram_user_id, base_email, variation):
+    """Store used email variation to avoid duplicates"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
     user_db = _get_user_collection(telegram_user_id)
-    variations_doc = await user_db.find_one({"type": "email_variations"})
+    user_db.update_one(
+        {"type": "email_variations"},
+        {"$addToSet": {f"data.{base_email}": variation}},
+        upsert=True
+    )
+    return True
+
+def get_used_email_variations(telegram_user_id, base_email):
+    """Get all used email variations for a base email"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return []
+    
+    user_db = _get_user_collection(telegram_user_id)
+    variations_doc = user_db.find_one({"type": "email_variations"})
     if variations_doc and "data" in variations_doc and base_email in variations_doc["data"]:
         return variations_doc["data"][base_email]
     return []
 
-async def set_auto_signup_enabled(telegram_user_id, enabled):
+# Auto signup settings
+def set_auto_signup_enabled(telegram_user_id, enabled):
+    """Enable or disable auto signup mode"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
+    user_db = _get_user_collection(telegram_user_id)
+    user_db.update_one(
+        {"type": "settings"},
+        {"$set": {"auto_signup_enabled": enabled}},
+        upsert=True
+    )
+    return True
+
+def get_auto_signup_enabled(telegram_user_id):
+    """Check if auto signup is enabled"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
+    user_db = _get_user_collection(telegram_user_id)
+    settings = user_db.find_one({"type": "settings"})
+    return settings.get("auto_signup_enabled", False) if settings else False
+
+# Signup configuration storage
+def set_signup_config(telegram_user_id, config):
+    """Store signup configuration"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return False
+    
+    user_db = _get_user_collection(telegram_user_id)
+    user_db.update_one(
+        {"type": "signup_config"},
+        {"$set": {"data": config}},
+        upsert=True
+    )
+    return True
+
+def get_signup_config(telegram_user_id):
+    """Get signup configuration"""
+    if not _ensure_user_collection_exists(telegram_user_id):
+        return None
+    
+    user_db = _get_user_collection(telegram_user_id)
+    config_doc = user_db.find_one({"type": "signup_config"})
+    return config_doc.get("data") if config_doc else None
+
+def transfer_user_data(from_telegram_id, to_telegram_id):
+    """Transfer all user data from one telegram user to another"""
+    return transfer_to_user(from_telegram_id, to_telegram_id)
 
 # Legacy functions for backward compatibility
 def has_interacted(telegram_user_id, action_type, user_token):
@@ -406,26 +775,3 @@ def log_interaction(telegram_user_id, action_type, user_token):
         "timestamp": datetime.datetime.utcnow()
     }
     db.interactions.insert_one(interaction_data)
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one({"type": "settings"}, {"$set": {"auto_signup_enabled": enabled}}, upsert=True)
-    return True
-
-async def get_auto_signup_enabled(telegram_user_id):
-    await _ensure_user_collection_exists(telegram_user_id)
-    settings = await _get_user_collection(telegram_user_id).find_one({"type": "settings"})
-    return settings.get("auto_signup_enabled", False) if settings else False
-
-async def set_signup_config(telegram_user_id, config):
-    await _ensure_user_collection_exists(telegram_user_id)
-    user_db = _get_user_collection(telegram_user_id)
-    await user_db.update_one({"type": "signup_config"}, {"$set": {"data": config}}, upsert=True)
-    return True
-
-async def get_signup_config(telegram_user_id):
-    await _ensure_user_collection_exists(telegram_user_id)
-    config_doc = await _get_user_collection(telegram_user_id).find_one({"type": "signup_config"})
-    return config_doc.get("data") if config_doc else None
-
-async def transfer_user_data(from_telegram_id, to_telegram_id):
-    return await transfer_to_user(from_telegram_id, to_telegram_id)
