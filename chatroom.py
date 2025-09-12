@@ -118,8 +118,8 @@ async def send_message_to_everyone(
     async with aiohttp.ClientSession() as session:
         while True:
             rooms, next_from = await (fetch_chatrooms(session, token, from_date, user_id)
-                                    if from_date is None else
-                                    fetch_more_chatrooms(session, token, from_date, user_id))
+                                      if from_date is None else
+                                      fetch_more_chatrooms(session, token, from_date, user_id))
             if not rooms:
                 break
             batch_total, batch_sent, batch_filtered = await process_chatroom_batch(
@@ -191,7 +191,7 @@ async def send_message_to_everyone_all_tokens(
         while running: # --- CHANGE: Loop condition is now simpler and more reliable ---
             lines = [
                 "🔄 <b>Chatroom AIO Status</b>\n",
-                "<pre>Account    │Rooms │Sent  │Filter│Status</pre>"
+                "<pre>Account   │Rooms │Sent  │Filter│Status</pre>"
             ]
             
             for status in token_status.values():
@@ -256,7 +256,7 @@ async def send_message_to_everyone_all_tokens(
         success_emoji = "✅" if success_rate > 90 else "⚠️" if success_rate > 70 else "❌"
         lines = [
             f"{success_emoji} <b>Chatroom AIO Completed</b> - {successful_tokens}/{len(tokens)} ({success_rate:.1f}%)\n",
-            "<pre>Account    │Rooms │Sent  │Filter│Status</pre>"
+            "<pre>Account   │Rooms │Sent  │Filter│Status</pre>"
         ]
         for status in token_status.values():
             name = status.get('name', 'N/A')
