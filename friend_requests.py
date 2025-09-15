@@ -9,6 +9,7 @@ from filters import apply_filter_for_account, is_request_filter_enabled
 from collections import defaultdict
 from dateutil import parser
 from datetime import datetime, timezone
+from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -36,19 +37,29 @@ stop_markup = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Stop Requests", callback_data="stop")]
 ])
 
-async def fetch_users(session, token):
+# --- FIX: Updated function to accept user_id and use consistent device info ---
+async def fetch_users(session, token, user_id):
     """Fetch users from the API for friend requests."""
     url = "https://api.meeff.com/user/explore/v2?lng=-112.0613784790039&unreachableUserIds=&lat=33.437198638916016&locale=en"
-    headers = {
+    
+    # Get the consistent device info for this specific token from the database
+    device_info = await get_or_create_device_info_for_token(user_id, token)
+    
+    base_headers = {
         'User-Agent': "okhttp/4.12.0",
-        'X-Device-Info': "iPhone15Pro-iOS17.5.1-6.6.2",
         'meeff-access-token': token
     }
+    # Inject the device info into the headers
+    headers = get_headers_with_device_info(base_headers, device_info)
+    
     try:
         async with session.get(url, headers=headers) as response:
+            if response.status == 401:
+                logging.error(f"Failed to fetch users: 401 Unauthorized (Token: {token[:10]}... is likely invalid)")
+                return None
             if response.status == 429:
                 logging.error("Request limit exceeded while fetching users.")
-                return None  # Special value for rate limiting
+                return None
             if response.status != 200:
                 logging.error(f"Failed to fetch users: {response.status}")
                 return []
@@ -58,59 +69,40 @@ async def fetch_users(session, token):
         return []
 
 def format_user(user):
+    """Formats user data into a readable HTML string."""
     def time_ago(dt_str):
-        if not dt_str:
-            return "N/A"
+        if not dt_str: return "N/A"
         try:
-            dt = parser.isoparse(dt_str)
-            from datetime import datetime, timezone
+            dt = parser.isoparse(dt_str).astimezone(timezone.utc)
             now = datetime.now(timezone.utc)
-            diff = now - dt
-            minutes = int(diff.total_seconds() // 60)
-            if minutes < 1:
-                return "just now"
-            elif minutes < 60:
-                return f"{minutes} min ago"
+            minutes = int((now - dt).total_seconds() // 60)
+            if minutes < 1: return "just now"
+            if minutes < 60: return f"{minutes} min ago"
             hours = minutes // 60
-            if hours < 24:
-                return f"{hours} hr ago"
-            days = hours // 24
-            return f"{days} day(s) ago"
+            if hours < 24: return f"{hours} hr ago"
+            return f"{hours // 24} day(s) ago"
         except Exception:
             return "unknown"
+
     last_active = time_ago(user.get("recentAt"))
-    nationality = html.escape(user.get('nationalityCode', 'N/A'))
-    height = html.escape(str(user.get('height', 'N/A')))
-    if "|" in height:
-        height_val, height_unit = height.split("|", 1)
-        height = f"{height_val.strip()} {height_unit.strip()}"
-    return (
+    height_raw = str(user.get('height', 'N/A'))
+    height = f"{height_raw.replace('|', ' ')}" if '|' in height_raw else height_raw
+    
+    card = (
         f"<b>Name:</b> {html.escape(user.get('name', 'N/A'))}\n"
         f"<b>ID:</b> <code>{html.escape(user.get('_id', 'N/A'))}</code>\n"
-        f"<b>Nationality:</b> {nationality}\n"
-        f"<b>Height:</b> {height}\n"
+        f"<b>Nationality:</b> {html.escape(user.get('nationalityCode', 'N/A'))}\n"
+        f"<b>Height:</b> {html.escape(height)}\n"
         f"<b>Description:</b> {html.escape(user.get('description', 'N/A'))}\n"
-        f"<b>Birth Year:</b> {html.escape(str(user.get('birthYear', 'N/A')))}\n"
-        f"<b>Platform:</b> {html.escape(user.get('platform', 'N/A'))}\n"
-        f"<b>Profile Score:</b> {html.escape(str(user.get('profileScore', 'N/A')))}\n"
-        f"<b>Distance:</b> {html.escape(str(user.get('distance', 'N/A')))} km\n"
-        f"<b>Language Codes:</b> {html.escape(', '.join(user.get('languageCodes', [])))}\n"
-        f"<b>Last Active:</b> {last_active}\n"
-        "Photos: " + ' '.join([f"<a href='{html.escape(url)}'>Photo</a>" for url in user.get('photoUrls', [])])
+        f"<b>Birth Year:</b> {user.get('birthYear', 'N/A')}\n"
+        f"<b>Last Active:</b> {last_active}"
     )
 
-def format_time_used(start_time, end_time):
-    delta = end_time - start_time
-    total_seconds = int(delta.total_seconds())
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours > 0:
-        return f"{hours}h {minutes}m {seconds}s"
-    elif minutes > 0:
-        return f"{minutes}m {seconds}s"
-    else:
-        return f"{seconds}s"
-
+    if user.get('photoUrls'):
+        photo_links = " ".join([f"<a href='{url}'>📷</a>" for url in user.get('photoUrls', [])])
+        card += f"\n<b>Photos:</b> {photo_links}"
+        
+    return card
 
 async def process_users(session, users, token, user_id, bot, token_name, already_sent_ids, lock):
     """Process a batch of users, sending friend requests and handling spam filters atomically."""
@@ -128,16 +120,13 @@ async def process_users(session, users, token, user_id, bot, token_name, already
 
         user_id_to_check = user["_id"]
 
-        # Atomically check and claim user if spam filter is on
         if is_spam_filter_enabled:
             async with lock:
                 if user_id_to_check in already_sent_ids:
                     filtered_count += 1
                     continue
-                # Claim this ID for the entire session
                 already_sent_ids.add(user_id_to_check)
         
-        # Send friend request
         url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user_id_to_check}&isOkay=1"
         headers = {"meeff-access-token": token, "Connection": "keep-alive"}
 
@@ -164,7 +153,6 @@ async def process_users(session, users, token, user_id, bot, token_name, already
             logging.error(f"Error processing user with {token_name}: {e}")
             await asyncio.sleep(PER_ERROR_DELAY)
     
-    # Persist all successfully sent IDs to the database in one go
     if is_spam_filter_enabled and ids_to_persist:
         await bulk_add_sent_ids(user_id, "request", ids_to_persist)
 
@@ -185,14 +173,12 @@ async def run_requests(user_id, bot, target_channel_id):
     tokens = await get_active_tokens(user_id)
     token_name = next((t.get("name", "Default") for t in tokens if t["token"] == token), "Default")
     
-    # Pre-load sent IDs from DB once
     already_sent_ids = await get_already_sent_ids(user_id, "request")
-    lock = asyncio.Lock() # For consistency with multi-token logic
+    lock = asyncio.Lock()
 
     async with aiohttp.ClientSession() as session:
         while state["running"]:
             try:
-                # --- THIS IS THE FIX (await removed) ---
                 if is_request_filter_enabled(user_id):
                     await apply_filter_for_account(token, user_id)
                     await asyncio.sleep(1)
@@ -204,9 +190,18 @@ async def run_requests(user_id, bot, target_channel_id):
                     reply_markup=stop_markup
                 )
 
-                users = await fetch_users(session, token)
+                # --- FIX: Pass user_id to fetch_users ---
+                users = await fetch_users(session, token, user_id)
                 state["batch_index"] += 1
                 
+                if users is None:
+                    await bot.edit_message_text(
+                        chat_id=user_id, message_id=state["status_message_id"],
+                        text=f"{token_name}: Token is invalid (401 Unauthorized). Stopping."
+                    )
+                    state["running"] = False
+                    break
+
                 if not users:
                     logging.info(f"No users found for batch {state['batch_index']}.")
                     if state["batch_index"] > 10:
@@ -251,60 +246,66 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
     except Exception as e:
         logging.error(f"Failed to pin message: {e}")
 
-    token_status = {token_obj.get("name", f"Account {i+1}"): {"added": 0, "filtered": 0, "status": "Queued"} for i, token_obj in enumerate(tokens)}
+    token_status = {
+        token_obj["token"]: {
+            "name": token_obj.get("name", f"Account {i+1}"),
+            "added": 0,
+            "filtered": 0,
+            "status": "Queued"
+        } for i, token_obj in enumerate(tokens)
+    }
     
-    # Pre-load all sent IDs once and share across all workers
     session_sent_ids = await get_already_sent_ids(user_id, "request")
     lock = asyncio.Lock()
 
     async def _worker(token_obj):
-        name = token_obj.get("name")
         token = token_obj["token"]
+        name = token_status[token]["name"]
         empty_batches = 0
         
         async with aiohttp.ClientSession() as session:
             while state["running"]:
                 try:
-                    # --- THIS IS THE FIX (await removed) ---
                     if is_request_filter_enabled(user_id):
                         await apply_filter_for_account(token, user_id)
                         await asyncio.sleep(1)
 
-                    users = await fetch_users(session, token)
+                    # --- FIX: Pass user_id to fetch_users ---
+                    users = await fetch_users(session, token, user_id)
                     
-                    if users is None: # Rate limited
-                        token_status[name]["status"] = "Rate limited"
+                    if users is None:
+                        token_status[token]["status"] = "Invalid (401)"
                         return
                     
                     if not users or len(users) < 5:
                         empty_batches += 1
-                        token_status[name]["status"] = f"Waiting ({empty_batches}/10)"
+                        token_status[token]["status"] = f"Waiting ({empty_batches}/10)"
                         await asyncio.sleep(EMPTY_BATCH_DELAY)
                         if empty_batches >= 10:
-                            token_status[name]["status"] = "No users"
+                            token_status[token]["status"] = "No users"
                             return
                         continue
                     
                     empty_batches = 0
-                    token_status[name]["status"] = "Processing"
+                    token_status[token]["status"] = "Processing"
                     
                     limit_reached, batch_added, batch_filtered = await process_users(session, users, token, user_id, bot, name, session_sent_ids, lock)
                     
-                    token_status[name]["added"] += batch_added
-                    token_status[name]["filtered"] += batch_filtered
+                    token_status[token]["added"] += batch_added
+                    token_status[token]["filtered"] += batch_filtered
                     
                     if limit_reached:
-                        token_status[name]["status"] = "Limit Full"
+                        token_status[token]["status"] = "Limit Full"
                         return
                         
                     await asyncio.sleep(PER_BATCH_DELAY)
 
                 except Exception as e:
                     logging.error(f"Error processing {name}: {e}")
-                    token_status[name]["status"] = "Retrying..."
+                    token_status[token]["status"] = "Retrying..."
                     await asyncio.sleep(PER_ERROR_DELAY)
         
-        token_status[name]["status"] = "Stopped"
+        token_status[token]["status"] = "Stopped"
 
     async def _refresh_ui():
         last_message = ""
@@ -313,7 +314,8 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
             header = f"🔄 <b>AIO Requests</b> | <b>Added:</b> {total_added_now}"
             
             lines = [header, "", "<pre>Account   │Added │Filter│Status      </pre>"]
-            for name, status in token_status.items():
+            for status in token_status.values():
+                name = status["name"]
                 display = name[:10] + '…' if len(name) > 10 else name.ljust(10)
                 lines.append(f"<pre>{display} │{status['added']:>5} │{status['filtered']:>6}│{status['status']:<10}</pre>")
 
@@ -337,7 +339,7 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
 
     # Clean up
     state["running"] = False
-    await asyncio.sleep(1.1) # Allow final UI update
+    await asyncio.sleep(1.1)
     ui_task.cancel()
     if state.get("pinned_message_id"):
         try: await bot.unpin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
@@ -349,7 +351,8 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
     final_header = f"<b>{completion_status}</b> | <b>Total Added:</b> {total_added}"
     
     final_lines = [final_header, "", "<pre>Account   │Added │Filter│Status      </pre>"]
-    for name, status in token_status.items():
+    for status in token_status.values():
+        name = status["name"]
         display = name[:10] + '…' if len(name) > 10 else name.ljust(10)
         final_lines.append(f"<pre>{display} │{status['added']:>5} │{status['filtered']:>6}│{status['status']}</pre>")
 
