@@ -37,7 +37,6 @@ stop_markup = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Stop Requests", callback_data="stop")]
 ])
 
-# --- FIX: Updated function to accept user_id and use consistent device info ---
 async def fetch_users(session, token, user_id):
     """Fetch users from the API for friend requests."""
     url = "https://api.meeff.com/user/explore/v2?lng=-112.0613784790039&unreachableUserIds=&lat=33.437198638916016&locale=en"
@@ -74,7 +73,6 @@ def format_user(user):
             return "N/A"
         try:
             dt = parser.isoparse(dt_str)
-            from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
             diff = now - dt
             minutes = int(diff.total_seconds() // 60)
@@ -131,6 +129,9 @@ async def process_users(session, users, token, user_id, bot, token_name, already
     is_spam_filter_enabled = await get_individual_spam_filter(user_id, "request")
     ids_to_persist = []
 
+    # Get device info once for this entire batch for consistency
+    device_info = await get_or_create_device_info_for_token(user_id, token)
+
     for user in users:
         if not state["running"]:
             break
@@ -145,7 +146,10 @@ async def process_users(session, users, token, user_id, bot, token_name, already
                 already_sent_ids.add(user_id_to_check)
         
         url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user_id_to_check}&isOkay=1"
-        headers = {"meeff-access-token": token, "Connection": "keep-alive"}
+        
+        # Use consistent device headers for the friend request action
+        base_headers = {"meeff-access-token": token}
+        headers = get_headers_with_device_info(base_headers, device_info)
 
         try:
             async with session.get(url, headers=headers) as response:
@@ -160,7 +164,14 @@ async def process_users(session, users, token, user_id, bot, token_name, already
                     ids_to_persist.append(user_id_to_check)
 
                 details = format_user(user)
-                await bot.send_message(chat_id=user_id, text=details, parse_mode="HTML", disable_web_page_preview=True)
+                
+                # *** THE FIX IS HERE: Photo previews are now enabled ***
+                await bot.send_message(
+                    chat_id=user_id, 
+                    text=details, 
+                    parse_mode="HTML", 
+                    disable_web_page_preview=False
+                )
                 
                 added_count += 1
                 state["total_added_friends"] += 1
@@ -207,7 +218,6 @@ async def run_requests(user_id, bot, target_channel_id):
                     reply_markup=stop_markup
                 )
 
-                # --- FIX: Pass user_id to fetch_users ---
                 users = await fetch_users(session, token, user_id)
                 state["batch_index"] += 1
                 
@@ -287,7 +297,6 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
                         await apply_filter_for_account(token, user_id)
                         await asyncio.sleep(1)
 
-                    # --- FIX: Pass user_id to fetch_users ---
                     users = await fetch_users(session, token, user_id)
                     
                     if users is None:
