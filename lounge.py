@@ -145,46 +145,59 @@ async def send_lounge(
         
         await update_status(f"✅ <b>Lounge Completed</b>\nSent: {total_sent} | Filtered: {total_filtered}")
 
+
 async def send_lounge_all_tokens(
     tokens_data: List[Dict], message: str, status_message: types.Message,
     bot, chat_id: int, spam_enabled: bool, user_id: int
 ) -> None:
     """Processes lounge messaging concurrently for all tokens with proper deduplication."""
-    token_status = {td.get("name", f"Acc {i+1}"): {"sent": 0, "filtered": 0, "status": "Queued"} for i, td in enumerate(tokens_data)}
+    # FIX: Use the unique token as the key to prevent overwriting accounts with the same name.
+    # The user-facing 'name' is now stored inside the value dictionary.
+    token_status = {
+        td["token"]: {
+            "name": td.get("name", f"Acc {i+1}"),
+            "sent": 0,
+            "filtered": 0,
+            "status": "Queued"
+        } for i, td in enumerate(tokens_data)
+    }
     
-    sent_ids = await is_already_sent(chat_id, "lounge", None, bulk=True) if spam_enabled else set()
-    processing_ids = set()
-    lock = asyncio.Lock()
-    running = True
+    sent_ids = await is_already_sent(chat_id, "lounge", None, bulk=True) if spam_enabled else set() #
+    processing_ids = set() #
+    lock = asyncio.Lock() #
+    running = True #
 
     async def _worker(token_data: Dict):
-        name = token_data.get("name")
-        token = token_data.get("token")
+        token = token_data.get("token") #
         
         async with aiohttp.ClientSession() as session:
-            token_status[name]["status"] = "Fetching"
-            users = await fetch_lounge_users(session, token, user_id)
+            # FIX: Use the token as the key for status updates
+            token_status[token]["status"] = "Fetching"
+            users = await fetch_lounge_users(session, token, user_id) #
             if not users:
-                token_status[name]["status"] = "No users"
+                token_status[token]["status"] = "No users"
                 return
 
-            token_status[name]["status"] = "Processing"
+            token_status[token]["status"] = "Processing"
             batch_sent, batch_filtered, successful_ids = await process_lounge_batch(
                 session, token, users, message, sent_ids, processing_ids, lock, user_id
-            )
+            ) #
 
             async with lock:
-                sent_ids.update(successful_ids)
+                sent_ids.update(successful_ids) #
                 if spam_enabled and successful_ids:
-                    await bulk_add_sent_ids(chat_id, "lounge", successful_ids)
+                    await bulk_add_sent_ids(chat_id, "lounge", successful_ids) #
 
-            token_status[name].update({"sent": batch_sent, "filtered": batch_filtered, "status": "Done"})
+            # FIX: Use the token as the key for status updates
+            token_status[token].update({"sent": batch_sent, "filtered": batch_filtered, "status": "Done"})
 
     async def _refresh_ui():
         last_message = ""
         while running:
             lines = ["🧾 <b>AIO Lounge Status</b>", "<pre>Account   | Sent | Filtered | State</pre>"]
-            for name, status in token_status.items():
+            # FIX: Iterate over the dictionary values to get status info
+            for status in token_status.values():
+                name = status['name'] # Get the display name from the inner dictionary
                 display_name = name[:10].ljust(10) if len(name) <= 10 else name[:9] + '…'
                 lines.append(f"<pre>{display_name}| {status['sent']:<4} | {status['filtered']:<8} | {status['status']}</pre>")
             
@@ -201,18 +214,20 @@ async def send_lounge_all_tokens(
                         logger.error(f"UI refresh error: {e}")
             await asyncio.sleep(1)
 
-    ui_task = asyncio.create_task(_refresh_ui())
-    worker_tasks = [asyncio.create_task(_worker(td)) for td in tokens_data]
-    await asyncio.gather(*worker_tasks, return_exceptions=True)
+    ui_task = asyncio.create_task(_refresh_ui()) #
+    worker_tasks = [asyncio.create_task(_worker(td)) for td in tokens_data] #
+    await asyncio.gather(*worker_tasks, return_exceptions=True) #
 
-    running = False
-    await asyncio.sleep(1.1)
-    ui_task.cancel()
+    running = False #
+    await asyncio.sleep(1.1) #
+    ui_task.cancel() #
 
-    total_sent = sum(s["sent"] for s in token_status.values())
+    total_sent = sum(s["sent"] for s in token_status.values()) #
     
     final_lines = [f"✅ <b>AIO Lounge Completed</b> (Total Sent: {total_sent})", "<pre>Account   | Sent | Filtered | State</pre>"]
-    for name, status in token_status.items():
+    # FIX: Iterate over the dictionary values for the final report as well
+    for status in token_status.values():
+        name = status['name'] # Get the display name from the inner dictionary
         display_name = name[:10].ljust(10) if len(name) <= 10 else name[:9] + '…'
         final_lines.append(f"<pre>{display_name}| {status['sent']:<4} | {status['filtered']:<8} | {status['status']}</pre>")
     
