@@ -82,10 +82,15 @@ SIGNUP_MENU = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="Sign In", callback_data="signin_go")
     ],
     [
-        InlineKeyboardButton(text="Multi Signup", callback_data="multi_signup_go"),
         InlineKeyboardButton(text="Signup Config", callback_data="signup_settings")
     ],
     [InlineKeyboardButton(text="Back to Main Menu", callback_data="back_to_menu")]
+])
+
+SIGNUP_TYPE_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Create a Single Account", callback_data="single_signup_go")],
+    [InlineKeyboardButton(text="Create Multiple Accounts", callback_data="multi_signup_go_start")],
+    [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
 
 VERIFY_BUTTON = InlineKeyboardMarkup(inline_keyboard=[
@@ -285,7 +290,35 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             reply_markup=BACK_TO_CONFIG,
             parse_mode="HTML"
         )
-    elif data == "multi_signup_go":
+    elif data == "signup_go":
+        state["stage"] = "menu" # Reset stage to prevent unintended behavior
+        user_signup_states[user_id] = state
+        await callback.message.edit_text(
+            "<b>Account Creation</b>\n\nChoose the type of account creation:",
+            reply_markup=SIGNUP_TYPE_MENU,
+            parse_mode="HTML"
+        )
+    elif data == "single_signup_go":
+        if config.get('auto_signup', False) and all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
+            state["stage"] = "auto_signup_ask_name"
+            await callback.message.edit_text(
+                "<b>Auto Signup</b>\n\nEnter the display name for the new account:",
+                reply_markup=BACK_TO_SIGNUP,
+                parse_mode="HTML"
+            )
+        else:
+            if config.get('auto_signup', False):
+                await callback.answer(
+                    "Auto Signup is ON, but config is incomplete. Starting manual setup.",
+                    show_alert=True
+                )
+            state["stage"] = "ask_email"
+            await callback.message.edit_text(
+                "<b>Manual Signup</b>\n\nPlease enter your email address:",
+                reply_markup=BACK_TO_SIGNUP,
+                parse_mode="HTML"
+            )
+    elif data == "multi_signup_go_start":
         if not all(k in config for k in ['email', 'password', 'gender', 'birth_year']):
             await callback.message.edit_text(
                 "<b>Configuration Incomplete</b>\n\nPlease set up Email, Password, Gender, and Birth Year in <b>Signup Config</b> first.",
@@ -350,7 +383,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             if res.get("user", {}).get("_id"):
                 created_accounts.append({
                     "email": email,
-                    "name": acc_state["name"],
+                    "name": acc["name"],
                     "password": config.get("password")
                 })
         
@@ -425,26 +458,6 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         else:
             result_text += "\n\n<b>All pending accounts have been verified!</b>"
             await callback.message.edit_text(result_text, reply_markup=SIGNUP_MENU, parse_mode="HTML")
-    elif data == "signup_go":
-        if config.get('auto_signup', False) and all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
-            state["stage"] = "auto_signup_ask_name"
-            await callback.message.edit_text(
-                "<b>Auto Signup</b>\n\nEnter the display name for the new account:",
-                reply_markup=BACK_TO_SIGNUP,
-                parse_mode="HTML"
-            )
-        else:
-            if config.get('auto_signup', False):
-                await callback.answer(
-                    "Auto Signup is ON, but config is incomplete. Starting manual setup.",
-                    show_alert=True
-                )
-            state["stage"] = "ask_email"
-            await callback.message.edit_text(
-                "<b>Manual Signup</b>\n\nPlease enter your email address:",
-                reply_markup=BACK_TO_SIGNUP,
-                parse_mode="HTML"
-            )
     elif data == "signup_menu":
         state["stage"] = "menu"
         await callback.message.edit_text(
@@ -690,25 +703,16 @@ async def signup_message_handler(message: Message) -> bool:
             await message.answer(f"Photo uploaded ({len(state[photo_key])}/6).", reply_markup=done_markup, parse_mode="HTML")
         else:
             await message.answer("Upload Failed. Please try again.", parse_mode="HTML")
-    elif stage in ["auto_signup_ask_name", "multi_ask_name"]:
-        is_multi = stage == "multi_ask_name"
-        name_key = "multi_name" if is_multi else "name"
-        photo_key = "multi_photos" if is_multi else "photos"
-        next_stage = "multi_ask_photos" if is_multi else "auto_signup_ask_photos"
-        done_markup = MULTI_DONE_PHOTOS if is_multi else DONE_PHOTOS
-        
-        state[name_key] = text
-        if not is_multi:
-            state["desc"] = get_random_bio()
-        state[photo_key] = []
-        state["stage"] = next_stage
-        
-        prompt = "<b>Profile Photos</b>\n\nSend up to 6 photos. Click 'Done' when finished."
-        if is_multi:
-            count = state.get("multi_count", 1)
-            prompt = f"<b>Multi Signup (Step 4/4)</b>\n\nSend up to 6 photos to be used for all {count} accounts. Click 'Done' when finished."
-        await message.answer(prompt, reply_markup=done_markup, parse_mode="HTML")
-
+    elif stage == "auto_signup_ask_name":
+        state["name"] = text
+        state["desc"] = get_random_bio()
+        state["photos"] = []
+        state["stage"] = "auto_signup_ask_photos"
+        await message.answer(
+            "<b>Profile Photos</b>\n\nSend up to 6 photos. Click 'Done' when finished.",
+            reply_markup=DONE_PHOTOS,
+            parse_mode="HTML"
+        )
     elif stage == "signin_email":
         state["signin_email"] = text
         state["stage"] = "signin_password"
