@@ -32,7 +32,7 @@ async def fetch_chatrooms(session: aiohttp.ClientSession, token: str, from_date:
     headers = BASE_HEADERS.copy()
     headers['meeff-access-token'] = token
     if user_id:
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
     try:
@@ -60,7 +60,7 @@ async def send_message(session: aiohttp.ClientSession, token: str, chatroom_id: 
     headers = BASE_HEADERS.copy()
     headers['meeff-access-token'] = token
     if user_id:
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(headers, device_info)
     
     payload = {"chatRoomId": chatroom_id, "message": message, "locale": "en"}
