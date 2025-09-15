@@ -201,7 +201,7 @@ async def show_signup_preview(message: Message, user_id: int, state: Dict) -> No
     preview_text = (
         f"<b>Signup Preview ({count} Account{'s' if count != 1 else ''})</b>\n\n"
         f"<b>Profile Nationality:</b> {nationality.upper()}\n"
-        f"<b>Filter Nationality:</b> {filter_nationality.upper()}\n"
+        f"<b>Filter Nationality:</b> {filter_nationality.upper() if filter_nationality else 'All Countries'}\n"
         f"<b>Photos:</b> {len(state.get('photos', []))} uploaded\n"
         f"<b>Gender:</b> {config.get('gender', 'N/A')}\n"
         f"<b>Birth Year:</b> {config.get('birth_year', 'N/A')}\n\n"
@@ -274,6 +274,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         )
     elif data == "signup_go":
         config = await get_signup_config(user_id) or {}
+        # Corrected logic to check for a complete auto-signup config
         if config.get('auto_signup', False) and all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
             state["stage"] = "ask_count"
             await callback.message.edit_text(
@@ -306,7 +307,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         )
     elif data.startswith("filter_nationality_"):
         code = data.split("_")[-1]
-        state["filter_nationality"] = code
+        state["filter_nationality"] = code if code.upper() != "ALL" else ""
         state["stage"] = "ask_names"
         user_signup_states[user_id] = state
         await callback.message.edit_text(
@@ -534,28 +535,34 @@ async def signup_message_handler(message: Message) -> bool:
             await message.answer("Invalid number. Please enter a number between 1 and 25.", parse_mode="HTML")
             return True
     elif stage == "ask_profile_nationality":
-        if text.upper() not in [c[0] for c in [("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"), ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"), ("BR", "🇧🇷"), ("CN", "🇨🇳"), ("JP", "🇯🇵"), ("KR", "🇰🇷"), ("CA", "🇨🇦"), ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦"), ("TR", "🇹🇷")]]:
+        # The callback handler for buttons already handles the logic, this is for manual text entry
+        valid_nationalities = [c[0] for c in [("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"), ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"), ("BR", "🇧🇷"), ("CN", "🇨🇳"), ("JP", "🇯🇵"), ("KR", "🇰🇷"), ("CA", "🇨🇦"), ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦"), ("TR", "🇹🇷")]]
+        if text.upper() not in valid_nationalities:
             await message.answer("Invalid nationality. Please select from the keyboard or enter a valid 2-letter code.", parse_mode="HTML")
             return True
+        
         state["profile_nationality"] = text.upper()
+        state["stage"] = "ask_filter_nationality"
         await message.answer(
             "<b>Signup (Step 3/5)</b>\n\nSelect the **filter** nationality for all accounts:",
             reply_markup=get_filter_nationality_keyboard(account_index=0),
             parse_mode="HTML"
         )
-        state["stage"] = "ask_filter_nationality"
     elif stage == "ask_filter_nationality":
-        if text.upper() not in [c[0] for c in [("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"), ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"), ("BR", "🇧🇷"), ("CN", "🇨🇳"), ("JP", "🇯🇵"), ("KR", "🇰🇷"), ("CA", "🇨🇦"), ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦"), ("TR", "🇹🇷")]]:
-            await message.answer("Invalid nationality. Please select from the keyboard or enter a valid 2-letter code.", parse_mode="HTML")
+        # The callback handler for buttons already handles the logic, this is for manual text entry
+        valid_nationalities = [c[0] for c in [("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"), ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"), ("BR", "🇧🇷"), ("CN", "🇨🇳"), ("JP", "🇯🇵"), ("KR", "🇰🇷"), ("CA", "🇨🇦"), ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦"), ("TR", "🇹🇷")]]
+        if text.upper() not in valid_nationalities and text.upper() != "ALL":
+            await message.answer("Invalid nationality. Please select from the keyboard or enter a valid 2-letter code or type 'All'.", parse_mode="HTML")
             return True
-        state["filter_nationality"] = text.upper()
+            
+        state["filter_nationality"] = text.upper() if text.upper() != "ALL" else ""
+        state["stage"] = "ask_names"
         await message.answer(
             "<b>Signup (Step 4/5)</b>\n\nEnter the name(s) for the accounts:\n"
             "• For one name on all accounts, type the name (e.g., <code>David</code>).\n"
             "• For multiple accounts, you may enter names separated by commas (e.g., <code>David, Mike, John</code>).",
             parse_mode="HTML"
         )
-        state["stage"] = "ask_names"
     elif stage == "ask_names":
         count = state.get("account_count", 1)
         names = [name.strip() for name in text.split(',') if name.strip()]
@@ -680,7 +687,7 @@ async def try_signup(state: Dict, telegram_user_id: int) -> Dict:
         "photos": "|".join(state.get("photos", [])) or DEFAULT_PHOTOS, "locale": "en",
         "color": "777777", "birthMonth": 3, "birthDay": 1, "languages": "en,es,fr",
         "levels": "5,1,1", "purpose": "PB000000,PB000001", "purposeEtcDetail": "",
-        "interest": "IS000001,IS000002,IS000003,IS000003",
+        "interest": "IS000001,IS000002,IS000003,IS000004",
     }
     
     payload = get_api_payload_with_device_info(base_payload, device_info)
