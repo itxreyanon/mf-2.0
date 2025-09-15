@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 
 # ✅ Speed configuration
-PER_USER_DELAY = 1      # Delay between sending requests to individual users
+PER_USER_DELAY = 0.5      # Delay between sending requests to individual users
 PER_BATCH_DELAY = 1       # Delay between fetching new batches of users
 EMPTY_BATCH_DELAY = 2     # Delay after receiving an empty batch
 PER_ERROR_DELAY = 5       # Delay after a network or API error
@@ -165,12 +165,11 @@ async def process_users(session, users, token, user_id, bot, token_name, already
 
                 details = format_user(user)
                 
-                # *** Photo previews are now enabled ***
+                # *** FIXED: Match code 2 exactly - remove explicit disable_web_page_preview to use default (previews enabled) ***
                 await bot.send_message(
                     chat_id=user_id, 
                     text=details, 
-                    parse_mode="HTML", 
-                    disable_web_page_preview=False
+                    parse_mode="HTML"
                 )
                 
                 added_count += 1
