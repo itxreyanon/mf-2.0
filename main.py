@@ -138,7 +138,7 @@ async def send_lounge_all(message: Message):
 
     spam_enabled = await get_individual_spam_filter(user_id, "lounge")
     status = await message.reply(f"<b>Starting Lounge Messages</b> for {len(active_tokens_data)} accounts...", parse_mode="HTML")
-    await send_lounge_all_tokens(active_tokens_data, custom_message, status, bot, user_id, spam_enabled, user_id)
+    await send_lounge_all_tokens(active_tokens_data, custom_message, status, bot, user_id, spam_enabled)
 
 @router.message(Command("lounge"))
 async def lounge_command(message: Message):
@@ -165,9 +165,18 @@ async def send_to_all_command(message: Message):
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2: return await message.reply("<b>Usage</b>\n<code>/chatroom &lt;message&gt;</code>", parse_mode="HTML")
     
-    custom_message, spam_enabled = parts[1], await get_individual_spam_filter(user_id, "chatroom")
+    custom_message = parts[1]
+    spam_enabled = await get_individual_spam_filter(user_id, "chatroom")
     status_message = await message.reply("<b>Starting Chatroom Messages...</b>", parse_mode="HTML")
-    total, sent, filtered = await send_message_to_everyone(token, custom_message, user_id, spam_enabled, user_id)
+
+    # --- FIX: Create sent_ids and lock for the single-token function call ---
+    sent_ids = await is_already_sent(user_id, "chatroom", None, bulk=True) if spam_enabled else set()
+    sent_ids_lock = asyncio.Lock()
+    
+    total, sent, filtered = await send_message_to_everyone(
+        token, custom_message, user_id, spam_enabled, user_id,
+        sent_ids, sent_ids_lock
+    )
     await status_message.edit_text(f"<b>Complete</b>\nTotal: {total}, Sent: {sent}, Filtered: {filtered}", parse_mode="HTML")
 
 @router.message(Command("send_chat_all"))
@@ -185,7 +194,11 @@ async def send_chat_all(message: Message):
     token_names = {t["token"]: t["name"] for t in active_tokens}
     spam_enabled = await get_individual_spam_filter(user_id, "chatroom")
     status = await message.reply(f"<b>Starting Multi-Account Chatroom ({len(tokens)})...</b>", parse_mode="HTML")
-    await send_message_to_everyone_all_tokens(tokens, custom_message, status, bot, user_id, spam_enabled, token_names, False, user_id)
+    
+    # --- FIX: Changed use_in_memory_deduplication from False to True to enable spam filter ---
+    await send_message_to_everyone_all_tokens(
+        tokens, custom_message, status, bot, user_id, spam_enabled, token_names, True, user_id
+    )
 
 @router.message(Command("invoke"))
 async def invoke_command(message: Message):
