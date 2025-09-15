@@ -44,7 +44,6 @@ async def open_chatroom_and_send(
     headers['meeff-access-token'] = token
     
     # 1. Open Chatroom
-    chatroom_id = None
     try:
         payload = {"waitingRoomId": target_meeff_id, "locale": "en"}
         async with session.post(CHATROOM_URL, json=payload, headers=headers, timeout=10) as response:
@@ -108,7 +107,6 @@ async def process_lounge_batch(
             user_meeff_id = users_to_process[i]["user"]["_id"]
             if result is True:
                 successful_ids.append(user_meeff_id)
-            # Remove from processing_ids regardless of outcome
             processing_ids.discard(user_meeff_id)
             
     return len(successful_ids), filtered_count, successful_ids
@@ -175,11 +173,9 @@ async def send_lounge_all_tokens(
                 session, token, users, message, sent_ids, processing_ids, lock, user_id
             )
 
-            # Use lock to safely update the shared sent_ids set
             async with lock:
                 sent_ids.update(successful_ids)
                 if spam_enabled and successful_ids:
-                    # Persist to DB within the lock to prevent race conditions
                     await bulk_add_sent_ids(chat_id, "lounge", successful_ids)
 
             token_status[name].update({"sent": batch_sent, "filtered": batch_filtered, "status": "Done"})
