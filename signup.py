@@ -50,8 +50,8 @@ def get_batch_nationality_keyboard() -> InlineKeyboardMarkup:
         ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦"), ("TR", "🇹🇷")
     ]
     keyboard = []
-    # "Other" button on its own row at the top
-    keyboard.append([InlineKeyboardButton(text="🌐 Other (Enter Code Manually)", callback_data="batch_nationality_other")])
+    # "All Nationalities" button that selects a default (US)
+    keyboard.append([InlineKeyboardButton(text="🌎 All Nationalities (Default)", callback_data="batch_nationality_US")])
 
     NATIONALITIES_PER_ROW = 5
     row = []
@@ -353,22 +353,13 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             )
     elif data.startswith("batch_nationality_"):
         code = data.split("_")[-1]
-        if code == "other":
-            state["stage"] = "batch_ask_nationality_manual"
-            user_signup_states[user_id] = state
-            await callback.message.edit_text(
-                "<b>Batch Signup (Step 1/3)</b>\n\nEnter the 2-letter nationality code for all 6 accounts (e.g., US, UK, FR).",
-                reply_markup=BACK_TO_SIGNUP,
-                parse_mode="HTML"
-            )
-        else:
-            state["batch_nationality"] = code
-            state["stage"] = "batch_ask_names"
-            user_signup_states[user_id] = state
-            await callback.message.edit_text(
-                f"<b>Batch Signup (Step 2/3)</b>\n\nNationality set to: <b>{code}</b>\n\nEnter the 6 names for the accounts, separated by commas.\n\n<b>Example:</b>\n<code>David, Mike, John, Chris, Alex, Sam</code>",
-                parse_mode="HTML"
-            )
+        state["batch_nationality"] = code
+        state["stage"] = "batch_ask_names"
+        user_signup_states[user_id] = state
+        await callback.message.edit_text(
+            f"<b>Batch Signup (Step 2/3)</b>\n\nNationality set to: <b>{code}</b>\n\nEnter the 6 names for the accounts, separated by commas.\n\n<b>Example:</b>\n<code>David, Mike, John, Chris, Alex, Sam</code>",
+            parse_mode="HTML"
+        )
     elif data == "multi_signup_photos_done":
         await show_multi_signup_preview(callback.message, user_id, state)
     elif data == "batch_signup_photos_done":
@@ -711,17 +702,6 @@ async def signup_message_handler(message: Message) -> bool:
                 reply_markup=DONE_PHOTOS,
                 parse_mode="HTML"
             )
-    elif stage == "batch_ask_nationality_manual":
-        if len(text) != 2:
-            await message.answer("Invalid code. Please enter a 2-letter code (e.g., US).", parse_mode="HTML")
-            return True
-        code = text.upper()
-        state["batch_nationality"] = code
-        state["stage"] = "batch_ask_names"
-        await message.answer(
-            f"<b>Batch Signup (Step 2/3)</b>\n\nNationality set to: <b>{code}</b>\n\nEnter the 6 names for the accounts, separated by commas.\n\n<b>Example:</b>\n<code>David, Mike, John, Chris, Alex, Sam</code>",
-            parse_mode="HTML"
-        )
     elif stage == "batch_ask_names":
         names = [name.strip() for name in text.split(',')]
         if len(names) != 6:
