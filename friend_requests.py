@@ -4,7 +4,7 @@ import logging
 import html
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from db import get_individual_spam_filter, add_sent_id, get_active_tokens, get_current_account, get_already_sent_ids
+from db import get_individual_spam_filter, bulk_add_sent_ids, get_active_tokens, get_current_account, get_already_sent_ids
 from filters import apply_filter_for_account, is_request_filter_enabled
 from collections import defaultdict
 from dateutil import parser
@@ -140,9 +140,9 @@ async def process_users(session, users, token, user_id, bot, token_name, already
             logging.error(f"Error processing user with {token_name}: {e}")
             await asyncio.sleep(PER_ERROR_DELAY)
     
-    # Persist all successfully sent IDs to the database in one go
+    # --- FIX: Use bulk_add_sent_ids for saving multiple IDs to the database ---
     if is_spam_filter_enabled and ids_to_persist:
-        await add_sent_id(user_id, "request", ids_to_persist)
+        await bulk_add_sent_ids(user_id, "request", ids_to_persist)
 
     return limit_reached, added_count, filtered_count
 
