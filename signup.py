@@ -676,7 +676,6 @@ async def try_signup(state: Dict, telegram_user_id: int) -> Dict:
     """Attempt to sign up a new user, using device info from the DB."""
     url = "https://api.meeff.com/user/register/email/v4"
     
-    # --- FIX: ADD AWAIT HERE ---
     device_info = await get_or_create_device_info_for_email(telegram_user_id, state["email"])
     
     # Define the base payload without device-specific keys
@@ -707,7 +706,6 @@ async def try_signin(email: str, password: str, telegram_user_id: int) -> Dict:
     """Attempt to sign in, using device info from the DB."""
     url = "https://api.meeff.com/user/login/v4"
     
-    # --- FIX: ADD AWAIT HERE ---
     device_info = await get_or_create_device_info_for_email(telegram_user_id, email)
 
     # Define the base payload
@@ -751,4 +749,3 @@ async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds:
             "<b>Error</b>\n\nToken not received, failed to save account.",
             parse_mode="HTML"
         )
-
