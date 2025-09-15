@@ -357,7 +357,13 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         state["stage"] = "batch_ask_names"
         user_signup_states[user_id] = state
         await callback.message.edit_text(
-            f"<b>Batch Signup (Step 2/3)</b>\n\nNationality set to: <b>{code}</b>\n\nEnter the 6 names for the accounts, separated by commas.\n\n<b>Example:</b>\n<code>David, Mike, John, Chris, Alex, Sam</code>",
+            (
+                f"<b>Batch Signup (Step 2/3)</b>\n\n"
+                f"Nationality set to: <b>{code}</b>\n\n"
+                "Enter the name(s) for the accounts:\n"
+                "• For one name on all 6 accounts, just type the name (e.g., <code>David</code>).\n"
+                "• For different names, type 6 names separated by commas (e.g., <code>David, Mike, John, Chris, Alex, Sam</code>)."
+            ),
             parse_mode="HTML"
         )
     elif data == "multi_signup_photos_done":
@@ -703,11 +709,26 @@ async def signup_message_handler(message: Message) -> bool:
                 parse_mode="HTML"
             )
     elif stage == "batch_ask_names":
-        names = [name.strip() for name in text.split(',')]
-        if len(names) != 6:
-            await message.answer(f"Invalid input. You provided {len(names)} names, but exactly 6 are required. Please try again.", parse_mode="HTML")
-            return True
-        state["batch_names"] = names
+        if ',' in text:
+            # Case 1: Multiple names provided, separated by comma
+            names = [name.strip() for name in text.split(',') if name.strip()]
+            if len(names) != 6:
+                await message.answer(
+                    f"<b>Invalid Input</b>\n\nYou provided {len(names)} names, but exactly 6 are required when using commas. Please try again.",
+                    parse_mode="HTML"
+                )
+                return True
+            state["batch_names"] = names
+        else:
+            # Case 2: Single name provided
+            single_name = text.strip()
+            if not single_name:
+                await message.answer("Name cannot be empty. Please try again.", parse_mode="HTML")
+                return True
+            # Apply the same name to all 6 accounts
+            state["batch_names"] = [single_name] * 6
+        
+        # Proceed to the next step
         state["batch_photos"] = []
         state["stage"] = "batch_ask_photos"
         await message.answer(
