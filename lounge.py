@@ -4,24 +4,26 @@ import logging
 from typing import List, Dict, Set
 from aiogram import types
 from db import bulk_add_sent_ids, is_already_sent
+from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
 
 LOUNGE_URL = "https://api.meeff.com/lounge/dashboard/v1"
 CHATROOM_URL = "https://api.meeff.com/chatroom/open/v2"
 SEND_MESSAGE_URL = "https://api.meeff.com/chat/send/v2"
-HEADERS = {
+BASE_HEADERS = {
     'User-Agent': "okhttp/4.12.0",
     'Accept-Encoding': "gzip",
     'content-type': "application/json; charset=utf-8",
-    'X-Device-Info': "iPhone15Pro-iOS17.5.1-6.6.2"
 }
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-async def fetch_lounge_users(session: aiohttp.ClientSession, token: str) -> List[Dict]:
-    """Fetch users from lounge with a persistent session."""
-    headers = HEADERS.copy()
+async def fetch_lounge_users(session: aiohttp.ClientSession, token: str, user_id: int) -> List[Dict]:
+    """Fetch users from lounge with a persistent session and consistent device info."""
+    device_info = await get_or_create_device_info_for_token(user_id, token)
+    headers = get_headers_with_device_info(BASE_HEADERS, device_info)
     headers['meeff-access-token'] = token
+    
     try:
         async with session.get(LOUNGE_URL, params={'locale': "en"}, headers=headers, timeout=10) as response:
             if response.status != 200:
@@ -34,26 +36,27 @@ async def fetch_lounge_users(session: aiohttp.ClientSession, token: str) -> List
         return []
 
 async def open_chatroom_and_send(
-    session: aiohttp.ClientSession, token: str, user_id: str, message: str
+    session: aiohttp.ClientSession, token: str, target_meeff_id: str, message: str, telegram_user_id: int
 ) -> bool:
-    """Atomically opens a chatroom and sends a message."""
-    headers = HEADERS.copy()
+    """Atomically opens a chatroom and sends a message using consistent device info."""
+    device_info = await get_or_create_device_info_for_token(telegram_user_id, token)
+    headers = get_headers_with_device_info(BASE_HEADERS, device_info)
     headers['meeff-access-token'] = token
     
     # 1. Open Chatroom
     try:
-        payload = {"waitingRoomId": user_id, "locale": "en"}
+        payload = {"waitingRoomId": target_meeff_id, "locale": "en"}
         async with session.post(CHATROOM_URL, json=payload, headers=headers, timeout=10) as response:
             if response.status == 412:
-                logger.info(f"User {user_id} has disabled chat.")
+                logger.info(f"User {target_meeff_id} has disabled chat.")
                 return False
             if response.status != 200:
-                logger.warning(f"Failed to open chatroom with {user_id} (Status: {response.status})")
+                logger.warning(f"Failed to open chatroom with {target_meeff_id} (Status: {response.status})")
                 return False
             data = await response.json()
             chatroom_id = data.get("chatRoom", {}).get("_id")
     except Exception as e:
-        logger.error(f"Error opening chatroom with {user_id}: {e}")
+        logger.error(f"Error opening chatroom with {target_meeff_id}: {e}")
         return False
 
     if not chatroom_id:
@@ -64,78 +67,75 @@ async def open_chatroom_and_send(
         payload = {"chatRoomId": chatroom_id, "message": message, "locale": "en"}
         async with session.post(SEND_MESSAGE_URL, json=payload, headers=headers, timeout=10) as response:
             if response.status == 200:
-                logger.info(f"Sent message to {user_id}")
+                logger.info(f"Sent message to {target_meeff_id}")
                 return True
-            logger.warning(f"Failed to send message to {user_id} (Status: {response.status})")
+            logger.warning(f"Failed to send message to {target_meeff_id} (Status: {response.status})")
             return False
     except Exception as e:
-        logger.error(f"Error sending message to {user_id}: {e}")
+        logger.error(f"Error sending message to {target_meeff_id}: {e}")
         return False
 
 async def process_lounge_batch(
     session: aiohttp.ClientSession, token: str, users: List[Dict], message: str,
-    sent_ids: Set[str], processing_ids: Set[str], lock: asyncio.Lock
-) -> tuple[int, int]:
-    """Processes a batch of users, preventing duplicate messages across all accounts."""
+    sent_ids: Set[str], processing_ids: Set[str], lock: asyncio.Lock, user_id: int
+) -> tuple[int, int, List[str]]:
+    """Processes a batch of users, passing the user_id for consistent device info."""
     tasks = []
     users_to_process = []
     filtered_count = 0
     
-    # Atomically check and claim users to process
     async with lock:
         for user in users:
-            user_id = user.get("user", {}).get("_id")
-            if not user_id:
+            user_meeff_id = user.get("user", {}).get("_id")
+            if not user_meeff_id:
                 continue
-            if user_id not in sent_ids and user_id not in processing_ids:
+            if user_meeff_id not in sent_ids and user_meeff_id not in processing_ids:
                 users_to_process.append(user)
-                processing_ids.add(user_id) # Claim this user ID
+                processing_ids.add(user_meeff_id)
             else:
                 filtered_count += 1
     
-    # Create concurrent tasks for the claimed users
     for user in users_to_process:
-        user_id = user["user"]["_id"]
-        tasks.append(open_chatroom_and_send(session, token, user_id, message))
+        user_meeff_id = user["user"]["_id"]
+        tasks.append(open_chatroom_and_send(session, token, user_meeff_id, message, user_id))
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
     successful_ids = []
-    # Process results and release claims
     async with lock:
         for i, result in enumerate(results):
-            user_id = users_to_process[i]["user"]["_id"]
+            user_meeff_id = users_to_process[i]["user"]["_id"]
             if result is True:
-                successful_ids.append(user_id)
-            processing_ids.discard(user_id) # Release claim
+                successful_ids.append(user_meeff_id)
+            processing_ids.discard(user_meeff_id)
             
     return len(successful_ids), filtered_count, successful_ids
 
 
 async def send_lounge(
     token: str, message: str, status_message: types.Message,
-    bot, chat_id: int, spam_enabled: bool
+    bot, chat_id: int, spam_enabled: bool, user_id: int
 ) -> None:
     """Sends a message to all users in the lounge for a single account."""
     total_sent = total_filtered = 0
     sent_ids = await is_already_sent(chat_id, "lounge", None, bulk=True) if spam_enabled else set()
     processing_ids = set()
-    lock = asyncio.Lock() # For consistency, though not strictly needed for single token
+    lock = asyncio.Lock()
 
     async def update_status(msg: str):
         try:
             await bot.edit_message_text(chat_id=chat_id, message_id=status_message.message_id, text=msg, parse_mode="HTML")
         except Exception:
-            pass # Ignore "message not modified" errors
+            pass
 
     await update_status("⏳ <b>Lounge Messaging:</b> Starting...")
     async with aiohttp.ClientSession() as session:
-        users = await fetch_lounge_users(session, token)
+        users = await fetch_lounge_users(session, token, user_id)
         if not users:
             return await update_status("⚠️ <b>Lounge Messaging:</b> No users found.")
 
         batch_sent, batch_filtered, successful_ids = await process_lounge_batch(
-            session, token, users, message, sent_ids, processing_ids, lock
+            session, token, users, message, sent_ids, processing_ids, lock, user_id
         )
         total_sent += batch_sent
         total_filtered += batch_filtered
@@ -147,12 +147,11 @@ async def send_lounge(
 
 async def send_lounge_all_tokens(
     tokens_data: List[Dict], message: str, status_message: types.Message,
-    bot, chat_id: int, spam_enabled: bool
+    bot, chat_id: int, spam_enabled: bool, user_id: int
 ) -> None:
     """Processes lounge messaging concurrently for all tokens with proper deduplication."""
     token_status = {td.get("name", f"Acc {i+1}"): {"sent": 0, "filtered": 0, "status": "Queued"} for i, td in enumerate(tokens_data)}
     
-    # Shared state for all workers to prevent race conditions
     sent_ids = await is_already_sent(chat_id, "lounge", None, bulk=True) if spam_enabled else set()
     processing_ids = set()
     lock = asyncio.Lock()
@@ -164,17 +163,16 @@ async def send_lounge_all_tokens(
         
         async with aiohttp.ClientSession() as session:
             token_status[name]["status"] = "Fetching"
-            users = await fetch_lounge_users(session, token)
+            users = await fetch_lounge_users(session, token, user_id)
             if not users:
                 token_status[name]["status"] = "No users"
                 return
 
             token_status[name]["status"] = "Processing"
             batch_sent, batch_filtered, successful_ids = await process_lounge_batch(
-                session, token, users, message, sent_ids, processing_ids, lock
+                session, token, users, message, sent_ids, processing_ids, lock, user_id
             )
 
-            # Update master sent list and persist to DB
             async with lock:
                 sent_ids.update(successful_ids)
                 if spam_enabled and successful_ids:
@@ -203,19 +201,15 @@ async def send_lounge_all_tokens(
                         logger.error(f"UI refresh error: {e}")
             await asyncio.sleep(1)
 
-    # Start UI and worker tasks
     ui_task = asyncio.create_task(_refresh_ui())
     worker_tasks = [asyncio.create_task(_worker(td)) for td in tokens_data]
     await asyncio.gather(*worker_tasks, return_exceptions=True)
 
-    # Cleanup
     running = False
-    await asyncio.sleep(1.1) # Allow for a final UI update
+    await asyncio.sleep(1.1)
     ui_task.cancel()
 
-    # Final Summary
     total_sent = sum(s["sent"] for s in token_status.values())
-    total_filtered = sum(s["filtered"] for s in token_status.values())
     
     final_lines = [f"✅ <b>AIO Lounge Completed</b> (Total Sent: {total_sent})", "<pre>Account   | Sent | Filtered | State</pre>"]
     for name, status in token_status.items():
