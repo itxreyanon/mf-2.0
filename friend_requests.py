@@ -165,7 +165,7 @@ async def process_users(session, users, token, user_id, bot, token_name, already
 
                 details = format_user(user)
                 
-                # *** THE FIX IS HERE: Photo previews are now enabled ***
+                # *** Photo previews are now enabled ***
                 await bot.send_message(
                     chat_id=user_id, 
                     text=details, 
