@@ -134,11 +134,12 @@ def get_nationality_keyboard(account_index):
     # Back button on its own row
     keyboard.append([InlineKeyboardButton(text=" Back", callback_data=f"account_filter_back_{account_index}")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
 async def apply_filter_for_account(token, user_id):
     """Apply stored filters for a specific account"""
     try:
-        # Get stored filters for this account
-        user_filters = get_user_filters(user_id, token) or {}
+        # --- FIX: Added await to get user filters ---
+        user_filters = await get_user_filters(user_id, token) or {}
         
         # Default filter data
         filter_data = {
@@ -181,11 +182,7 @@ async def set_account_filter(callback_query: types.CallbackQuery):
     """Handle account-specific filter settings"""
     user_id = callback_query.from_user.id
     
-    # --- THIS IS THE FIX ---
-    # Changed get_active_tokens to get_tokens.
-    # This ensures the button handler uses the same full account list as the menu,
-    # so the button index will always match the correct account.
-    tokens = get_tokens(user_id)
+    tokens = await get_tokens(user_id)
     
     # Parse callback data
     data_parts = callback_query.data.split('_')
@@ -284,8 +281,8 @@ async def set_account_filter(callback_query: types.CallbackQuery):
             token = tokens[account_index]['token']
             account_name = tokens[account_index].get('name', f'Account {account_index + 1}')
             
-            # Get current filters
-            user_filters = get_user_filters(user_id, token) or {}
+            # --- FIX: Added await to get user filters ---
+            user_filters = await get_user_filters(user_id, token) or {}
             
             # Update gender filter
             if gender == "male":
@@ -295,19 +292,8 @@ async def set_account_filter(callback_query: types.CallbackQuery):
             elif gender == "all":
                 user_filters["filterGenderType"] = 7
             
-            # Ensure other required fields exist
-            user_filters.update({
-                "filterBirthYearFrom": user_filters.get("filterBirthYearFrom", 1979),
-                "filterBirthYearTo": 2006,
-                "filterDistance": 510,
-                "filterLanguageCodes": user_filters.get("filterLanguageCodes", ""),
-                "filterNationalityBlock": user_filters.get("filterNationalityBlock", 0),
-                "filterNationalityCode": user_filters.get("filterNationalityCode", ""),
-                "locale": "en"
-            })
-            
             # Save filters
-            set_user_filters(user_id, token, user_filters)
+            await set_user_filters(user_id, token, user_filters)
             
             # Apply filter immediately
             await apply_filter_for_account(token, user_id)
@@ -330,26 +316,15 @@ async def set_account_filter(callback_query: types.CallbackQuery):
             token = tokens[account_index]['token']
             account_name = tokens[account_index].get('name', f'Account {account_index + 1}')
             
-            # Get current filters
-            user_filters = get_user_filters(user_id, token) or {}
+            # --- FIX: Added await to get user filters ---
+            user_filters = await get_user_filters(user_id, token) or {}
             
             # Update age filter
-            current_year = 2025 # Using current year
+            current_year = 2025 
             user_filters["filterBirthYearFrom"] = current_year - age
-            user_filters["filterBirthYearTo"] = 2006
-            
-            # Ensure other required fields exist
-            user_filters.update({
-                "filterGenderType": user_filters.get("filterGenderType", 7),
-                "filterDistance": 510,
-                "filterLanguageCodes": user_filters.get("filterLanguageCodes", ""),
-                "filterNationalityBlock": user_filters.get("filterNationalityBlock", 0),
-                "filterNationalityCode": user_filters.get("filterNationalityCode", ""),
-                "locale": "en"
-            })
             
             # Save filters
-            set_user_filters(user_id, token, user_filters)
+            await set_user_filters(user_id, token, user_filters)
             
             # Apply filter immediately
             await apply_filter_for_account(token, user_id)
@@ -372,8 +347,8 @@ async def set_account_filter(callback_query: types.CallbackQuery):
             token = tokens[account_index]['token']
             account_name = tokens[account_index].get('name', f'Account {account_index + 1}')
             
-            # Get current filters
-            user_filters = get_user_filters(user_id, token) or {}
+            # --- FIX: Added await to get user filters ---
+            user_filters = await get_user_filters(user_id, token) or {}
             
             # Update nationality filter
             if nationality == "all":
@@ -381,19 +356,8 @@ async def set_account_filter(callback_query: types.CallbackQuery):
             else:
                 user_filters["filterNationalityCode"] = nationality
             
-            # Ensure other required fields exist
-            user_filters.update({
-                "filterGenderType": user_filters.get("filterGenderType", 7),
-                "filterBirthYearFrom": user_filters.get("filterBirthYearFrom", 1979),
-                "filterBirthYearTo": 2006,
-                "filterDistance": 510,
-                "filterLanguageCodes": user_filters.get("filterLanguageCodes", ""),
-                "filterNationalityBlock": user_filters.get("filterNationalityBlock", 0),
-                "locale": "en"
-            })
-            
             # Save filters
-            set_user_filters(user_id, token, user_filters)
+            await set_user_filters(user_id, token, user_filters)
             
             # Apply filter immediately
             await apply_filter_for_account(token, user_id)
