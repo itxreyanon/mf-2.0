@@ -9,9 +9,9 @@ from device_info import get_or_create_device_info_for_token, get_headers_with_de
 
 # Global state for filter settings
 user_filter_states = {}
-async def get_meeff_filter_main_keyboard(user_id):
+def get_meeff_filter_main_keyboard(user_id):
     """Main Meeff Filter menu with an efficient, horizontal account layout."""
-    tokens = await get_tokens(user_id)
+    tokens = get_tokens(user_id)
     
     # Get current filter status
     filter_enabled = user_filter_states.get(user_id, {}).get('request_filter_enabled', True)
@@ -161,7 +161,7 @@ async def apply_filter_for_account(token, user_id):
         }
         
         # Get device info for this token
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info(base_headers, device_info)
         
         async with aiohttp.ClientSession() as session:
@@ -181,9 +181,11 @@ async def set_account_filter(callback_query: types.CallbackQuery):
     """Handle account-specific filter settings"""
     user_id = callback_query.from_user.id
     
+    # --- THIS IS THE FIX ---
+    # Changed get_active_tokens to get_tokens.
     # This ensures the button handler uses the same full account list as the menu,
     # so the button index will always match the correct account.
-    tokens = await get_tokens(user_id)
+    tokens = get_tokens(user_id)
     
     # Parse callback data
     data_parts = callback_query.data.split('_')
@@ -199,7 +201,7 @@ async def set_account_filter(callback_query: types.CallbackQuery):
         await callback_query.message.edit_text(
             "🎛️ <b>Meeff Filter Settings</b>\n\n"
             "Configure filters for each account and enable/disable request filtering:",
-            reply_markup=await get_meeff_filter_main_keyboard(user_id),
+            reply_markup=get_meeff_filter_main_keyboard(user_id),
             parse_mode="HTML"
         )
         await callback_query.answer(f"Request filter {'enabled' if not current_status else 'disabled'}!")
@@ -209,7 +211,7 @@ async def set_account_filter(callback_query: types.CallbackQuery):
         await callback_query.message.edit_text(
             "🎛️ <b>Meeff Filter Settings</b>\n\n"
             "Configure filters for each account and enable/disable request filtering:",
-            reply_markup=await get_meeff_filter_main_keyboard(user_id),
+            reply_markup=get_meeff_filter_main_keyboard(user_id),
             parse_mode="HTML"
         )
         await callback_query.answer()
@@ -338,7 +340,7 @@ async def set_account_filter(callback_query: types.CallbackQuery):
             
             # Ensure other required fields exist
             user_filters.update({
-                "filterGenderType": user_filters.get("filterGenderType", 5),
+                "filterGenderType": user_filters.get("filterGenderType", 7),
                 "filterDistance": 510,
                 "filterLanguageCodes": user_filters.get("filterLanguageCodes", ""),
                 "filterNationalityBlock": user_filters.get("filterNationalityBlock", 0),
@@ -414,7 +416,7 @@ async def meeff_filter_command(message: types.Message):
     await message.answer(
         "🎛️ <b>Meeff Filter Settings</b>\n\n"
         "Configure filters for each account and enable/disable request filtering:",
-        reply_markup=await get_meeff_filter_main_keyboard(user_id),
+        reply_markup=get_meeff_filter_main_keyboard(user_id),
         parse_mode="HTML"
     )
 
