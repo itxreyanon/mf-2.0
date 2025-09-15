@@ -87,12 +87,6 @@ SIGNUP_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Back to Main Menu", callback_data="back_to_menu")]
 ])
 
-SIGNUP_TYPE_MENU = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Create a Single Account", callback_data="single_signup_go")],
-    [InlineKeyboardButton(text="Create Multiple Accounts", callback_data="multi_signup_go_start")],
-    [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
-])
-
 VERIFY_BUTTON = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Verify Email", callback_data="signup_verify")],
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
@@ -291,34 +285,6 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             parse_mode="HTML"
         )
     elif data == "signup_go":
-        state["stage"] = "menu" # Reset stage to prevent unintended behavior
-        user_signup_states[user_id] = state
-        await callback.message.edit_text(
-            "<b>Account Creation</b>\n\nChoose the type of account creation:",
-            reply_markup=SIGNUP_TYPE_MENU,
-            parse_mode="HTML"
-        )
-    elif data == "single_signup_go":
-        if config.get('auto_signup', False) and all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
-            state["stage"] = "auto_signup_ask_name"
-            await callback.message.edit_text(
-                "<b>Auto Signup</b>\n\nEnter the display name for the new account:",
-                reply_markup=BACK_TO_SIGNUP,
-                parse_mode="HTML"
-            )
-        else:
-            if config.get('auto_signup', False):
-                await callback.answer(
-                    "Auto Signup is ON, but config is incomplete. Starting manual setup.",
-                    show_alert=True
-                )
-            state["stage"] = "ask_email"
-            await callback.message.edit_text(
-                "<b>Manual Signup</b>\n\nPlease enter your email address:",
-                reply_markup=BACK_TO_SIGNUP,
-                parse_mode="HTML"
-            )
-    elif data == "multi_signup_go_start":
         if not all(k in config for k in ['email', 'password', 'gender', 'birth_year']):
             await callback.message.edit_text(
                 "<b>Configuration Incomplete</b>\n\nPlease set up Email, Password, Gender, and Birth Year in <b>Signup Config</b> first.",
@@ -383,7 +349,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             if res.get("user", {}).get("_id"):
                 created_accounts.append({
                     "email": email,
-                    "name": acc["name"],
+                    "name": current_name,
                     "password": config.get("password")
                 })
         
@@ -458,13 +424,6 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         else:
             result_text += "\n\n<b>All pending accounts have been verified!</b>"
             await callback.message.edit_text(result_text, reply_markup=SIGNUP_MENU, parse_mode="HTML")
-    elif data == "signup_menu":
-        state["stage"] = "menu"
-        await callback.message.edit_text(
-            "<b>Account Creation</b>\n\nChoose an option:",
-            reply_markup=SIGNUP_MENU,
-            parse_mode="HTML"
-        )
     elif data == "signin_go":
         state["stage"] = "signin_email"
         await callback.message.edit_text(
@@ -628,7 +587,7 @@ async def signup_message_handler(message: Message) -> bool:
             if text.upper() not in ("M", "F"):
                 await message.answer("Invalid. Please enter M or F:", parse_mode="HTML")
                 return True
-            state["gender"] = text.upper()
+            config["gender"] = text.upper()
             state["stage"] = "ask_desc"
             await message.answer(
                 "<b>Profile Description</b>\nEnter your profile bio:",
