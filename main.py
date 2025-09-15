@@ -1,3 +1,4 @@
+# main.py
 import asyncio
 import logging
 from datetime import datetime, timedelta
@@ -230,7 +231,7 @@ async def add_person_command(message: Message):
 
     person_id = args[1]
     url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={person_id}&isOkay=1"
-    device_info = get_or_create_device_info_for_token(user_id, token)
+    device_info = await get_or_create_device_info_for_token(user_id, token)
     headers = get_headers_with_device_info({"meeff-access-token": token}, device_info)
     
     try:
@@ -275,7 +276,7 @@ async def handle_new_token(message: Message):
         if len(token) < 100: return await message.reply("Invalid token format.")
 
         verification_msg = await message.reply("<b>Verifying Token...</b>", parse_mode="HTML")
-        device_info = get_or_create_device_info_for_token(user_id, token)
+        device_info = await get_or_create_device_info_for_token(user_id, token)
         headers = get_headers_with_device_info({'User-Agent': "okhttp/5.0.0-alpha.14", 'meeff-access-token': token}, device_info)
         async with aiohttp.ClientSession() as session:
             try:
