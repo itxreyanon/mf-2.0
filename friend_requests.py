@@ -140,7 +140,7 @@ async def process_users(session, users, token, user_id, bot, token_name, already
             logging.error(f"Error processing user with {token_name}: {e}")
             await asyncio.sleep(PER_ERROR_DELAY)
     
-    # --- FIX: Use bulk_add_sent_ids for saving multiple IDs to the database ---
+    # Persist all successfully sent IDs to the database in one go
     if is_spam_filter_enabled and ids_to_persist:
         await bulk_add_sent_ids(user_id, "request", ids_to_persist)
 
@@ -168,7 +168,8 @@ async def run_requests(user_id, bot, target_channel_id):
     async with aiohttp.ClientSession() as session:
         while state["running"]:
             try:
-                if await is_request_filter_enabled(user_id):
+                # --- THIS IS THE FIX (await removed) ---
+                if is_request_filter_enabled(user_id):
                     await apply_filter_for_account(token, user_id)
                     await asyncio.sleep(1)
                 
@@ -240,7 +241,8 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
         async with aiohttp.ClientSession() as session:
             while state["running"]:
                 try:
-                    if await is_request_filter_enabled(user_id):
+                    # --- THIS IS THE FIX (await removed) ---
+                    if is_request_filter_enabled(user_id):
                         await apply_filter_for_account(token, user_id)
                         await asyncio.sleep(1)
 
