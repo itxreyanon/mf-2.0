@@ -9,7 +9,8 @@ from typing import Dict, List, Optional, Tuple
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dateutil import parser
 from device_info import get_or_create_device_info_for_email, get_api_payload_with_device_info
-from db import set_token, set_info_card, set_signup_config, get_signup_config
+from db import set_token, set_info_card, set_signup_config, get_signup_config, add_used_email_variation
+from filters import set_user_filters, apply_filter_for_account
 
 # Logging configuration
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ DEFAULT_PHOTOS = (
 user_signup_states: Dict[int, Dict] = {}
 
 def get_nationality_keyboard() -> InlineKeyboardMarkup:
-    """Creates an inline keyboard for selecting nationality."""
+    """Creates an inline keyboard for selecting profile nationality."""
     countries = [
         ("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"),
         ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"),
@@ -197,7 +198,7 @@ async def show_signup_preview(message: Message, user_id: int, state: Dict) -> No
     email_variations = generate_email_variations(config.get("email", ""), count)
     preview_text = (
         f"<b>Signup Preview ({count} Account{'s' if count != 1 else ''})</b>\n\n"
-        f"<b>Nationality:</b> {nationality.upper()}\n"
+        f"<b>Profile Nationality:</b> {nationality.upper()}\n"
         f"<b>Photos:</b> {len(state.get('photos', []))} uploaded\n"
         f"<b>Gender:</b> {config.get('gender', 'N/A')}\n"
         f"<b>Birth Year:</b> {config.get('birth_year', 'N/A')}\n\n"
@@ -220,7 +221,7 @@ async def signup_settings_command(message: Message, is_callback: bool = False) -
         f"<b>Password:</b> <code>{'*' * len(config.get('password', '')) if config.get('password') else 'Not set'}</code>\n"
         f"<b>Gender:</b> {config.get('gender', 'Not set')}\n"
         f"<b>Birth Year:</b> {config.get('birth_year', 'Not set')}\n"
-        f"<b>Nationality:</b> {config.get('nationality', 'Not set')}\n"
+        f"<b>Profile Nationality:</b> {config.get('nationality', 'Not set')}\n"
         f"<b>Auto Signup:</b> {'ON' if auto_signup_status else 'OFF'}\n\n"
         "Turn <b>Auto Signup ON</b> to use these settings automatically for single signups."
     )
@@ -297,7 +298,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         await callback.message.edit_text(
             (
                 f"<b>Signup (Step 2/4)</b>\n\n"
-                f"Nationality set to: <b>{code}</b>\n\n"
+                f"Profile nationality set to: <b>{code}</b>\n\n"
                 "Enter the name(s) for the accounts:\n"
                 "• For one name on all accounts, type the name (e.g., <code>David</code>).\n"
                 "• For 6 accounts, you may enter 6 names separated by commas (e.g., <code>David, Mike, John, Chris, Alex, Sam</code>)."
@@ -317,6 +318,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         created_accounts, email_idx = [], 0
         while len(created_accounts) < count and email_idx < len(email_variations):
             email = email_variations[email_idx]
+            await add_used_email_variation(user_id, config.get("email", ""), email)  # Track all attempted emails
             email_idx += 1
             is_available, _ = await check_email_exists(email)
             if not is_available:
@@ -382,6 +384,12 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                         "token": res["accessToken"]
                     })
                     await set_info_card(user_id, res["accessToken"], format_user_with_nationality(res["user"]), acc["email"])
+                    # Auto-set search filter nationality to match profile nationality
+                    profile_nat = res["user"].get("nationalityCode", "US")
+                    user_filters = await get_user_filters(user_id, res["accessToken"]) or {}
+                    user_filters["filterNationalityCode"] = profile_nat
+                    await set_user_filters(user_id, res["accessToken"], user_filters)
+                    await apply_filter_for_account(res["accessToken"], user_id)
                 verified.append(acc)
             else:
                 failed.append(acc)
@@ -391,7 +399,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             f"<b>Pending Verification:</b> {len(failed)}\n\n"
         )
         if verified:
-            result_text += "<b>Added:</b>\n" + '\n'.join([f"• {a['name']}" for a in verified])
+            result_text += "<b>Added:</b>\n" + '\n'.join([f"• {a['name']} (Search filter set to {res['user']['nationalityCode']})" for a in verified])
         if failed:
             result_text += "\n<b>Still Pending:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in failed])
         await callback.message.edit_text(
@@ -446,7 +454,7 @@ async def signup_message_handler(message: Message) -> bool:
             await message.answer("<b>Setup Gender</b>\nEnter gender (M/F):", reply_markup=BACK_TO_CONFIG, parse_mode="HTML")
         elif stage == "config_gender":
             if text.upper() not in ("M", "F"):
-                lave message.answer("Invalid. Please enter M or F:", parse_mode="HTML")
+                await message.answer("Invalid. Please enter M or F:", parse_mode="HTML")
                 return True
             config["gender"] = text.upper()
             state["stage"] = "config_birth_year"
@@ -459,7 +467,7 @@ async def signup_message_handler(message: Message) -> bool:
                 config["birth_year"] = year
                 state["stage"] = "config_nationality"
                 await message.answer(
-                    "<b>Setup Nationality</b>\nEnter a 2-letter code (e.g., US, UK):",
+                    "<b>Setup Profile Nationality</b>\nEnter a 2-letter code (e.g., US, PK):",
                     reply_markup=BACK_TO_CONFIG,
                     parse_mode="HTML"
                 )
@@ -505,7 +513,7 @@ async def signup_message_handler(message: Message) -> bool:
             if count == 6 and not config.get('nationality'):
                 state["stage"] = "select_nationality"
                 await message.answer(
-                    "<b>Signup (Step 2/4)</b>\n\nSelect the nationality for all 6 accounts:",
+                    "<b>Signup (Step 2/4)</b>\n\nSelect the profile nationality for all 6 accounts:",
                     reply_markup=get_nationality_keyboard(),
                     parse_mode="HTML"
                 )
@@ -701,8 +709,14 @@ async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds:
         })
         text = format_user_with_nationality(user_data)
         await set_info_card(user_id, access_token, text, creds.get("email"))
+        # Auto-set search filter nationality to match profile nationality
+        profile_nat = user_data.get("nationalityCode", "US")
+        user_filters = await get_user_filters(user_id, access_token) or {}
+        user_filters["filterNationalityCode"] = profile_nat
+        await set_user_filters(user_id, access_token, user_filters)
+        await apply_filter_for_account(access_token, user_id)
         await msg_obj.edit_text(
-            "<b>Account Signed In & Saved!</b>\n\n" + text,
+            "<b>Account Signed In & Saved!</b>\n\n" + text + f"\n\nSearch filter nationality set to {profile_nat}",
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=SIGNUP_MENU
@@ -712,3 +726,4 @@ async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds:
             "<b>Error</b>\n\nToken not received, failed to save account.",
             parse_mode="HTML"
         )
+</x
