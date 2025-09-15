@@ -165,11 +165,11 @@ async def process_users(session, users, token, user_id, bot, token_name, already
 
                 details = format_user(user)
                 
-                # *** FIXED: Match code 2 exactly - remove explicit disable_web_page_preview to use default (previews enabled) ***
                 await bot.send_message(
                     chat_id=user_id, 
                     text=details, 
-                    parse_mode="HTML"
+                    parse_mode="HTML", 
+                    disable_web_page_preview=False
                 )
                 
                 added_count += 1
