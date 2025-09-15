@@ -1,4 +1,4 @@
-
+import asyncio
 import aiohttp
 import json
 import random
@@ -31,14 +31,51 @@ DEFAULT_BIOS = [
     "Fitness enthusiast and nature lover",
 ]
 DEFAULT_PHOTOS = (
-    "[https://meeffus.s3.amazonaws.com/profile/2025/06/16/](https://meeffus.s3.amazonaws.com/profile/2025/06/16/)"
+    "https://meeffus.s3.amazonaws.com/profile/2025/06/16/"
     "20250616052423006_profile-1.0-bd262b27-1916-4bd3-9f1d-0e7fdba35268.jpg|"
-    "[https://meeffus.s3.amazonaws.com/profile/2025/06/16/](https://meeffus.s3.amazonaws.com/profile/2025/06/16/)"
+    "https://meeffus.s3.amazonaws.com/profile/2025/06/16/"
     "20250616052438006_profile-1.0-349bf38c-4555-40cc-a322-e61afe15aa35.jpg"
 )
 
 # Global state
 user_signup_states: Dict[int, Dict] = {}
+
+
+def get_batch_nationality_keyboard() -> InlineKeyboardMarkup:
+    """Creates an inline keyboard for selecting nationality during batch signup."""
+    countries = [
+        ("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"),
+        ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"),
+        ("BR", "🇧🇷"), ("CN", "🇨🇳"), ("JP", "🇯🇵"), ("KR", "🇰🇷"), ("CA", "🇨🇦"),
+        ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦"), ("TR", "🇹🇷")
+    ]
+    keyboard = []
+    # "All Nationalities" button that selects a default (US)
+    keyboard.append([InlineKeyboardButton(text="🌎 All Nationalities (Default)", callback_data="batch_nationality_US")])
+
+    NATIONALITIES_PER_ROW = 5
+    row = []
+    for code, flag in countries:
+        row.append(InlineKeyboardButton(
+            text=f"{flag} {code}",
+            callback_data=f"batch_nationality_{code}"
+        ))
+        if len(row) == NATIONALITIES_PER_ROW:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton(text="Back", callback_data="signup_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_multi_signup_confirm_keyboard(count: int) -> InlineKeyboardMarkup:
+    """Generates the confirmation keyboard for multi-signup with a dynamic account count."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"Create {count} Accounts", callback_data="multi_signup_confirm")],
+        [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
+    ])
+
 
 # Inline Keyboard Menus
 SIGNUP_MENU = InlineKeyboardMarkup(inline_keyboard=[
@@ -48,13 +85,14 @@ SIGNUP_MENU = InlineKeyboardMarkup(inline_keyboard=[
     ],
     [
         InlineKeyboardButton(text="Multi Signup", callback_data="multi_signup_go"),
-        InlineKeyboardButton(text="Signup Config", callback_data="signup_settings")
+        InlineKeyboardButton(text="Batch Signup (6)", callback_data="batch_signup_go")
     ],
+    [InlineKeyboardButton(text="Signup Config", callback_data="signup_settings")],
     [InlineKeyboardButton(text="Back to Main Menu", callback_data="back_to_menu")]
 ])
 
-MULTI_SIGNUP_CONFIRM = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Create Accounts", callback_data="multi_signup_confirm")],
+BATCH_SIGNUP_CONFIRM = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Create 6 Accounts", callback_data="batch_signup_confirm")],
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
 
@@ -85,6 +123,12 @@ MULTI_DONE_PHOTOS = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Done", callback_data="multi_signup_photos_done")],
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
+
+BATCH_DONE_PHOTOS = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Done", callback_data="batch_signup_photos_done")],
+    [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
+])
+
 
 def format_user_with_nationality(user: Dict) -> str:
     """Format user information into a displayable string with nationality and last active time."""
@@ -159,7 +203,7 @@ def get_random_bio() -> str:
 
 async def check_email_exists(email: str) -> Tuple[bool, str]:
     """Check if an email is available for signup."""
-    url = "[https://api.meeff.com/user/checkEmail/v1](https://api.meeff.com/user/checkEmail/v1)"
+    url = "https://api.meeff.com/user/checkEmail/v1"
     payload = {"email": email, "locale": "en"}
     headers = {
         'User-Agent': "okhttp/5.0.0-alpha.14",
@@ -180,27 +224,37 @@ async def check_email_exists(email: str) -> Tuple[bool, str]:
 async def show_multi_signup_preview(message: Message, user_id: int, state: Dict) -> None:
     """Show a preview of the multi-signup configuration."""
     config = await get_signup_config(user_id) or {}
-    if not all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
-        await message.edit_text(
-            "<b>Configuration Incomplete</b>\n\nYou must set up all details in 'Signup Config' first.",
-            reply_markup=SIGNUP_MENU,
-            parse_mode="HTML"
-        )
-        return
-    email_variations = generate_email_variations(config.get("email", ""), 5)
+    count = state.get("multi_count", 1)
+    email_variations = generate_email_variations(config.get("email", ""), count)
     preview_text = (
-        f"<b>Multi Signup Preview</b>\n\n"
+        f"<b>Multi Signup Preview ({count} Accounts)</b>\n\n"
         f"<b>Base Name:</b> {state.get('multi_name', 'N/A')}\n"
-        f"<b>Number of Accounts:</b> {state.get('num_accounts', 'N/A')}\n"
         f"<b>Photos:</b> {len(state.get('multi_photos', []))} uploaded\n"
         f"<b>Gender:</b> {config.get('gender', 'N/A')}\n"
         f"<b>Birth Year:</b> {config.get('birth_year', 'N/A')}\n"
         f"<b>Nationality:</b> {config.get('nationality', 'N/A')}\n\n"
         f"<b>Example Email Variations:</b>\n" +
-        '\n'.join([f"{i+1}. {email}" for i, email in enumerate(email_variations)]) +
+        '\n'.join([f"• {email}" for email in email_variations]) +
         f"\n\n<b>Accounts to create with name:</b> {state.get('multi_name', 'N/A')}\n"
     )
-    await message.edit_text(preview_text, reply_markup=MULTI_SIGNUP_CONFIRM, parse_mode="HTML")
+    await message.edit_text(preview_text, reply_markup=get_multi_signup_confirm_keyboard(count), parse_mode="HTML")
+
+async def show_batch_signup_preview(message: Message, user_id: int, state: Dict) -> None:
+    """Show a preview of the batch-signup configuration."""
+    config = await get_signup_config(user_id) or {}
+    names = state.get('batch_names', [])
+    preview_text = (
+        f"<b>Batch Signup Preview (6 Accounts)</b>\n\n"
+        f"<b>Nationality:</b> {state.get('batch_nationality', 'N/A').upper()}\n"
+        f"<b>Photos:</b> {len(state.get('batch_photos', []))} uploaded\n"
+        f"<b>Gender:</b> {config.get('gender', 'N/A')}\n"
+        f"<b>Birth Year:</b> {config.get('birth_year', 'N/A')}\n\n"
+        f"<b>Account Names:</b>\n" +
+        '\n'.join([f"• {name.strip()}" for name in names]) +
+        f"\n\nConfirm to create these 6 accounts."
+    )
+    await message.edit_text(preview_text, reply_markup=BATCH_SIGNUP_CONFIRM, parse_mode="HTML")
+
 
 async def signup_settings_command(message: Message, is_callback: bool = False) -> None:
     """Display and manage signup configuration settings."""
@@ -215,7 +269,7 @@ async def signup_settings_command(message: Message, is_callback: bool = False) -
         f"<b>Birth Year:</b> {config.get('birth_year', 'Not set')}\n"
         f"<b>Nationality:</b> {config.get('nationality', 'Not set')}\n"
         f"<b>Auto Signup:</b> {'ON' if auto_signup_status else 'OFF'}\n\n"
-        "Turn <b>Auto Signup ON</b> to use these settings automatically."
+        "Turn <b>Auto Signup ON</b> to use these settings automatically for single signups."
     )
     menu = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Auto Signup: {'Turn OFF' if auto_signup_status else 'Turn ON'}", callback_data="toggle_auto_signup")],
@@ -270,28 +324,55 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 parse_mode="HTML"
             )
         else:
-            state["stage"] = "multi_ask_name"
+            state["stage"] = "multi_ask_count"
             user_signup_states[user_id] = state
             await callback.message.edit_text(
-                "<b>Multi Signup</b>\n\nEnter the name for the accounts (e.g., 'David').",
+                "<b>Multi Signup (Step 1/3)</b>\n\nEnter the number of accounts you want to create (e.g., 10).",
                 reply_markup=BACK_TO_SIGNUP,
                 parse_mode="HTML"
             )
-    elif data == "multi_signup_photos_done":
-        state["stage"] = "multi_ask_num_accounts"
+    elif data == "batch_signup_go":
+        config = await get_signup_config(user_id) or {}
+        if not all(k in config for k in ['email', 'password', 'gender', 'birth_year']):
+            await callback.message.edit_text(
+                "<b>Configuration Incomplete</b>\n\nPlease set up Email, Password, Gender, and Birth Year in <b>Signup Config</b> first.",
+                reply_markup=SIGNUP_MENU,
+                parse_mode="HTML"
+            )
+        else:
+            state["stage"] = "batch_select_nationality"
+            user_signup_states[user_id] = state
+            await callback.message.edit_text(
+                "<b>Batch Signup (Step 1/3)</b>\n\nSelect the nationality for all 6 accounts:",
+                reply_markup=get_batch_nationality_keyboard(),
+                parse_mode="HTML"
+            )
+    elif data.startswith("batch_nationality_"):
+        code = data.split("_")[-1]
+        state["batch_nationality"] = code
+        state["stage"] = "batch_ask_names"
         user_signup_states[user_id] = state
         await callback.message.edit_text(
-            "<b>Multi Signup</b>\n\nHow many accounts do you want to create (1-50)?",
-            reply_markup=BACK_TO_SIGNUP,
+            (
+                f"<b>Batch Signup (Step 2/3)</b>\n\n"
+                f"Nationality set to: <b>{code}</b>\n\n"
+                "Enter the name(s) for the accounts:\n"
+                "• For one name on all 6 accounts, just type the name (e.g., <code>David</code>).\n"
+                "• For different names, type 6 names separated by commas (e.g., <code>David, Mike, John, Chris, Alex, Sam</code>)."
+            ),
             parse_mode="HTML"
         )
+    elif data == "multi_signup_photos_done":
+        await show_multi_signup_preview(callback.message, user_id, state)
+    elif data == "batch_signup_photos_done":
+        await show_batch_signup_preview(callback.message, user_id, state)
     elif data == "multi_signup_confirm":
-        await callback.message.edit_text("<b>Creating Accounts</b>...", parse_mode="HTML")
+        count = state.get("multi_count", 1)
+        await callback.message.edit_text(f"<b>Creating {count} Accounts</b>...", parse_mode="HTML")
         config = await get_signup_config(user_id) or {}
-        num_accounts = state.get("num_accounts", 5)
-        email_variations = generate_email_variations(config.get("email", ""), num_accounts * 2)
+        email_variations = generate_email_variations(config.get("email", ""), count * 5) # Generate more emails
         created_accounts, email_idx = [], 0
-        while len(created_accounts) < num_accounts and email_idx < len(email_variations):
+        while len(created_accounts) < count and email_idx < len(email_variations):
             email = email_variations[email_idx]
             email_idx += 1
             is_available, _ = await check_email_exists(email)
@@ -316,7 +397,60 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 })
         state["created_accounts"] = created_accounts
         result_text = (
-            f"<b>Multi Signup Results</b>\n\n<b>Created:</b> {len(created_accounts)} accounts\n\n"
+            f"<b>Multi Signup Results</b>\n\n<b>Created:</b> {len(created_accounts)} of {count} accounts\n\n"
+        )
+        if created_accounts:
+            result_text += "<b>Created Accounts:</b>\n" + '\n'.join([
+                f"• {a['name']} - <code>{a['email']}</code>" for a in created_accounts
+            ])
+        result_text += "\n\nPlease verify all emails, then click the button below."
+        await callback.message.edit_text(
+            result_text,
+            reply_markup=MULTI_VERIFY_BUTTON,
+            parse_mode="HTML"
+        )
+    elif data == "batch_signup_confirm":
+        await callback.message.edit_text("<b>Creating 6 Accounts</b>...", parse_mode="HTML")
+        config = await get_signup_config(user_id) or {}
+        names = state.get('batch_names', [])
+        nationality = state.get('batch_nationality', 'US')
+        photos = state.get('batch_photos', [])
+        
+        email_variations = generate_email_variations(config.get("email", ""), 50)
+        created_accounts, email_idx = [], 0
+        
+        while len(created_accounts) < 6 and email_idx < len(email_variations):
+            if len(created_accounts) >= len(names):
+                break # Stop if we run out of names
+                
+            email = email_variations[email_idx]
+            email_idx += 1
+            is_available, _ = await check_email_exists(email)
+            if not is_available:
+                continue
+
+            current_name = names[len(created_accounts)].strip()
+            acc_state = {
+                "email": email,
+                "password": config.get("password"),
+                "name": current_name,
+                "gender": config.get("gender"),
+                "desc": get_random_bio(),
+                "photos": photos,
+                "birth_year": config.get("birth_year", 2000),
+                "nationality": nationality
+            }
+            res = await try_signup(acc_state, user_id)
+            if res.get("user", {}).get("_id"):
+                created_accounts.append({
+                    "email": email,
+                    "name": acc_state["name"],
+                    "password": config.get("password")
+                })
+
+        state["created_accounts"] = created_accounts
+        result_text = (
+            f"<b>Batch Signup Results</b>\n\n<b>Created:</b> {len(created_accounts)} of 6 accounts\n\n"
         )
         if created_accounts:
             result_text += "<b>Created Accounts:</b>\n" + '\n'.join([
@@ -338,19 +472,19 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         for acc in created_accounts:
             res = await try_signin(acc["email"], acc["password"], user_id)
             if res.get("accessToken"):
-                await set_token(user_id, res["accessToken"], acc["name"], email=acc["email"])
+                await set_token(user_id, res["accessToken"], acc["name"], acc["email"])
                 if res.get("user"):
                     res["user"].update({
                         "email": acc["email"],
                         "password": acc["password"],
                         "token": res["accessToken"]
                     })
-                    await set_info_card(user_id, res["accessToken"], format_user_with_nationality(res["user"]), email=acc["email"])
+                    await set_info_card(user_id, res["accessToken"], format_user_with_nationality(res["user"]), acc["email"])
                 verified.append(acc)
             else:
                 failed.append(acc)
         result_text = (
-            f"<b>Multi Signup Complete!</b>\n\n"
+            f"<b>Multi/Batch Signup Complete!</b>\n\n"
             f"<b>Verified & Saved:</b> {len(verified)}\n"
             f"<b>Pending Verification:</b> {len(failed)}\n\n"
         )
@@ -571,11 +705,58 @@ async def signup_message_handler(message: Message) -> bool:
                 reply_markup=DONE_PHOTOS,
                 parse_mode="HTML"
             )
-    elif stage in ["ask_photos", "auto_signup_ask_photos", "multi_ask_photos"]:
+    elif stage == "multi_ask_count":
+        try:
+            count = int(text)
+            if not 1 <= count <= 25: # Set a reasonable limit
+                raise ValueError()
+            state["multi_count"] = count
+            state["stage"] = "multi_ask_name"
+            await message.answer(
+                "<b>Multi Signup (Step 2/3)</b>\n\nEnter the name to be used for all accounts (e.g., 'David').",
+                reply_markup=BACK_TO_SIGNUP,
+                parse_mode="HTML"
+            )
+        except ValueError:
+            await message.answer("Invalid number. Please enter a number between 1 and 25.", parse_mode="HTML")
+            return True
+    elif stage == "batch_ask_names":
+        if ',' in text:
+            # Case 1: Multiple names provided, separated by comma
+            names = [name.strip() for name in text.split(',') if name.strip()]
+            if len(names) != 6:
+                await message.answer(
+                    f"<b>Invalid Input</b>\n\nYou provided {len(names)} names, but exactly 6 are required when using commas. Please try again.",
+                    parse_mode="HTML"
+                )
+                return True
+            state["batch_names"] = names
+        else:
+            # Case 2: Single name provided
+            single_name = text.strip()
+            if not single_name:
+                await message.answer("Name cannot be empty. Please try again.", parse_mode="HTML")
+                return True
+            # Apply the same name to all 6 accounts
+            state["batch_names"] = [single_name] * 6
+        
+        # Proceed to the next step
+        state["batch_photos"] = []
+        state["stage"] = "batch_ask_photos"
+        await message.answer(
+            "<b>Batch Signup (Step 3/3)</b>\n\nSend up to 6 photos to be used for all accounts. Click 'Done' when finished.",
+            reply_markup=BATCH_DONE_PHOTOS,
+            parse_mode="HTML"
+        )
+    elif stage in ["ask_photos", "auto_signup_ask_photos", "multi_ask_photos", "batch_ask_photos"]:
         if message.content_type != "photo":
             await message.answer("Please send a photo or click 'Done'.", parse_mode="HTML")
             return True
-        photo_key = "multi_photos" if stage == "multi_ask_photos" else "photos"
+        
+        if stage == "multi_ask_photos": photo_key = "multi_photos"
+        elif stage == "batch_ask_photos": photo_key = "batch_photos"
+        else: photo_key = "photos"
+        
         if len(state.get(photo_key, [])) >= 6:
             await message.answer("Photo limit reached (6). Click Done.", parse_mode="HTML")
             return True
@@ -587,40 +768,25 @@ async def signup_message_handler(message: Message) -> bool:
             await message.answer(f"Photo uploaded ({len(state[photo_key])}/6).", parse_mode="HTML")
         else:
             await message.answer("Upload Failed. Please try again.", parse_mode="HTML")
-    elif stage in ["auto_signup_ask_name", "multi_ask_name", "multi_ask_num_accounts"]:
-        if stage == "multi_ask_name":
-            state["multi_name"] = text
-            state["multi_photos"] = []
-            state["stage"] = "multi_ask_photos"
-            await message.answer(
-                f"<b>Profile Photos</b>\n\nSend up to 6 photos. Click 'Done' when finished.",
-                reply_markup=MULTI_DONE_PHOTOS,
-                parse_mode="HTML"
-            )
-        elif stage == "multi_ask_num_accounts":
-            try:
-                num = int(text)
-                if not 1 <= num <= 50:
-                    raise ValueError()
-                state["num_accounts"] = num
-                await show_multi_signup_preview(message, user_id, state)
-                state["stage"] = "await_multi_confirm"
-            except ValueError:
-                await message.answer("Invalid number. Please enter a number between 1 and 50:", parse_mode="HTML")
-        else:
-            name_key = "multi_name" if stage == "multi_ask_name" else "name"
-            photo_key = "multi_photos" if stage == "multi_ask_name" else "photos"
-            next_stage = "multi_ask_photos" if stage == "multi_ask_name" else "auto_signup_ask_photos"
-            state[name_key] = text
-            if stage == "auto_signup_ask_name":
-                state["desc"] = get_random_bio()
-            state[photo_key] = []
-            state["stage"] = next_stage
-            await message.answer(
-                f"<b>Profile Photos</b>\n\nSend up to 6 photos. Click 'Done' when finished.",
-                reply_markup=MULTI_DONE_PHOTOS if stage == "multi_ask_name" else DONE_PHOTOS,
-                parse_mode="HTML"
-            )
+    elif stage in ["auto_signup_ask_name", "multi_ask_name"]:
+        is_multi = stage == "multi_ask_name"
+        name_key = "multi_name" if is_multi else "name"
+        photo_key = "multi_photos" if is_multi else "photos"
+        next_stage = "multi_ask_photos" if is_multi else "auto_signup_ask_photos"
+        done_markup = MULTI_DONE_PHOTOS if is_multi else DONE_PHOTOS
+        
+        state[name_key] = text
+        if not is_multi: # Auto signup
+            state["desc"] = get_random_bio()
+        state[photo_key] = []
+        state["stage"] = next_stage
+        
+        prompt = "<b>Profile Photos</b>\n\nSend up to 6 photos. Click 'Done' when finished."
+        if is_multi:
+            prompt = "<b>Multi Signup (Step 3/3)</b>\n\nSend up to 6 photos to be used for all accounts. Click 'Done' when finished."
+
+        await message.answer(prompt, reply_markup=done_markup, parse_mode="HTML")
+
     elif stage == "signin_email":
         state["signin_email"] = text
         state["stage"] = "signin_password"
@@ -651,7 +817,7 @@ async def upload_tg_photo(message: Message) -> Optional[str]:
     """Upload a Telegram photo to Meeff's server."""
     try:
         file = await message.bot.get_file(message.photo[-1].file_id)
-        file_url = f"[https://api.telegram.org/file/bot](https://api.telegram.org/file/bot){message.bot.token}/{file.file_path}"
+        file_url = f"https://api.telegram.org/file/bot{message.bot.token}/{file.file_path}"
         async with aiohttp.ClientSession() as session:
             async with session.get(file_url) as resp:
                 if resp.status != 200:
@@ -663,7 +829,7 @@ async def upload_tg_photo(message: Message) -> Optional[str]:
 
 async def meeff_upload_image(img_bytes: bytes) -> Optional[str]:
     """Upload an image to Meeff's S3 storage."""
-    url = "[https://api.meeff.com/api/upload/v1](https://api.meeff.com/api/upload/v1)"
+    url = "https://api.meeff.com/api/upload/v1"
     payload = {"category": "profile", "count": 1, "locale": "en"}
     headers = {
         'User-Agent': "okhttp/5.0.0-alpha.14",
@@ -698,19 +864,13 @@ async def meeff_upload_image(img_bytes: bytes) -> Optional[str]:
                     return upload_info.get("uploadImagePath") if s3resp.status in (200, 204) else None
     except Exception as e:
         logger.error(f"Error uploading image to Meeff: {e}")
-        return {"errorMessage": "Failed to upload image."}
+        return None
 
 async def try_signup(state: Dict, telegram_user_id: int) -> Dict:
     """Attempt to sign up a new user, using device info from the DB."""
-    url = "[https://api.meeff.com/user/register/email/v4](https://api.meeff.com/user/register/email/v4)"
+    url = "https://api.meeff.com/user/register/email/v4"
     
-    # Get or create device info for this specific email
     device_info = await get_or_create_device_info_for_email(telegram_user_id, state["email"])
-    
-    # --- ADDED FOR DEBUGGING ---
-    unique_id = device_info.get("device_unique_id")
-    logging.warning(f"SIGN UP using Device ID: {unique_id} for email {state['email']}")
-    # ---------------------------
     
     # Define the base payload without device-specific keys
     base_payload = {
@@ -738,15 +898,9 @@ async def try_signup(state: Dict, telegram_user_id: int) -> Dict:
 
 async def try_signin(email: str, password: str, telegram_user_id: int) -> Dict:
     """Attempt to sign in, using device info from the DB."""
-    url = "[https://api.meeff.com/user/login/v4](https://api.meeff.com/user/login/v4)"
+    url = "https://api.meeff.com/user/login/v4"
     
-    # Get or create device info for this specific email
     device_info = await get_or_create_device_info_for_email(telegram_user_id, email)
-    
-    # --- ADDED FOR DEBUGGING ---
-    unique_id = device_info.get("device_unique_id")
-    logging.warning(f"SIGN IN using Device ID: {unique_id} for email {email}")
-    # ---------------------------
 
     # Define the base payload
     base_payload = {"provider": "email", "providerId": email, "providerToken": password, "locale": "en"}
@@ -771,18 +925,19 @@ async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds:
     user_data = login_result.get("user")
     if access_token and user_data:
         user_id = msg_obj.chat.id
-        await set_token(user_id, access_token, user_data.get("name", creds.get("email")), email=creds.get("email"))
+        await set_token(user_id, access_token, user_data.get("name", creds.get("email")), creds.get("email"))
         user_data.update({
             "email": creds.get("email"),
             "password": creds.get("password"),
             "token": access_token
         })
         text = format_user_with_nationality(user_data)
-        await set_info_card(user_id, access_token, text, email=creds.get("email"))
+        await set_info_card(user_id, access_token, text, creds.get("email"))
         await msg_obj.edit_text(
             "<b>Account Signed In & Saved!</b>\n\n" + text,
             parse_mode="HTML",
-            disable_web_page_preview=True
+            disable_web_page_preview=True,
+            reply_markup=SIGNUP_MENU
         )
     else:
         await msg_obj.edit_text(
