@@ -40,6 +40,36 @@ DEFAULT_PHOTOS = (
 # Global state
 user_signup_states: Dict[int, Dict] = {}
 
+
+def get_batch_nationality_keyboard() -> InlineKeyboardMarkup:
+    """Creates an inline keyboard for selecting nationality during batch signup."""
+    countries = [
+        ("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"),
+        ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"),
+        ("BR", "🇧🇷"), ("CN", "🇨🇳"), ("JP", "🇯🇵"), ("KR", "🇰🇷"), ("CA", "🇨🇦"),
+        ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦"), ("TR", "🇹🇷")
+    ]
+    keyboard = []
+    # "Other" button on its own row at the top
+    keyboard.append([InlineKeyboardButton(text="🌐 Other (Enter Code Manually)", callback_data="batch_nationality_other")])
+
+    NATIONALITIES_PER_ROW = 5
+    row = []
+    for code, flag in countries:
+        row.append(InlineKeyboardButton(
+            text=f"{flag} {code}",
+            callback_data=f"batch_nationality_{code}"
+        ))
+        if len(row) == NATIONALITIES_PER_ROW:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton(text="Back", callback_data="signup_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
 # Inline Keyboard Menus
 SIGNUP_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [
@@ -314,11 +344,29 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 parse_mode="HTML"
             )
         else:
-            state["stage"] = "batch_ask_nationality"
+            state["stage"] = "batch_select_nationality"
+            user_signup_states[user_id] = state
+            await callback.message.edit_text(
+                "<b>Batch Signup (Step 1/3)</b>\n\nSelect the nationality for all 6 accounts:",
+                reply_markup=get_batch_nationality_keyboard(),
+                parse_mode="HTML"
+            )
+    elif data.startswith("batch_nationality_"):
+        code = data.split("_")[-1]
+        if code == "other":
+            state["stage"] = "batch_ask_nationality_manual"
             user_signup_states[user_id] = state
             await callback.message.edit_text(
                 "<b>Batch Signup (Step 1/3)</b>\n\nEnter the 2-letter nationality code for all 6 accounts (e.g., US, UK, FR).",
                 reply_markup=BACK_TO_SIGNUP,
+                parse_mode="HTML"
+            )
+        else:
+            state["batch_nationality"] = code
+            state["stage"] = "batch_ask_names"
+            user_signup_states[user_id] = state
+            await callback.message.edit_text(
+                f"<b>Batch Signup (Step 2/3)</b>\n\nNationality set to: <b>{code}</b>\n\nEnter the 6 names for the accounts, separated by commas.\n\n<b>Example:</b>\n<code>David, Mike, John, Chris, Alex, Sam</code>",
                 parse_mode="HTML"
             )
     elif data == "multi_signup_photos_done":
@@ -663,14 +711,15 @@ async def signup_message_handler(message: Message) -> bool:
                 reply_markup=DONE_PHOTOS,
                 parse_mode="HTML"
             )
-    elif stage == "batch_ask_nationality":
+    elif stage == "batch_ask_nationality_manual":
         if len(text) != 2:
-            await message.answer("Invalid nationality. Please enter a 2-letter code (e.g., US).", parse_mode="HTML")
+            await message.answer("Invalid code. Please enter a 2-letter code (e.g., US).", parse_mode="HTML")
             return True
-        state["batch_nationality"] = text.upper()
+        code = text.upper()
+        state["batch_nationality"] = code
         state["stage"] = "batch_ask_names"
         await message.answer(
-            "<b>Batch Signup (Step 2/3)</b>\n\nEnter the 6 names for the accounts, separated by commas.\n\n<b>Example:</b>\n<code>David, Mike, John, Chris, Alex, Sam</code>",
+            f"<b>Batch Signup (Step 2/3)</b>\n\nNationality set to: <b>{code}</b>\n\nEnter the 6 names for the accounts, separated by commas.\n\n<b>Example:</b>\n<code>David, Mike, John, Chris, Alex, Sam</code>",
             parse_mode="HTML"
         )
     elif stage == "batch_ask_names":
