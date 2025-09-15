@@ -587,7 +587,7 @@ async def signup_message_handler(message: Message) -> bool:
             if text.upper() not in ("M", "F"):
                 await message.answer("Invalid. Please enter M or F:", parse_mode="HTML")
                 return True
-            config["gender"] = text.upper()
+            state["gender"] = text.upper()
             state["stage"] = "ask_desc"
             await message.answer(
                 "<b>Profile Description</b>\nEnter your profile bio:",
