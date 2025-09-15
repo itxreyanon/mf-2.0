@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 
 # ✅ Speed configuration
-PER_USER_DELAY = 0.5      # Delay between sending requests to individual users
+PER_USER_DELAY = 0.5      # Delay can be fast again because we send photos directly
 PER_BATCH_DELAY = 1       # Delay between fetching new batches of users
 EMPTY_BATCH_DELAY = 2     # Delay after receiving an empty batch
 PER_ERROR_DELAY = 5       # Delay after a network or API error
@@ -41,14 +41,12 @@ async def fetch_users(session, token, user_id):
     """Fetch users from the API for friend requests."""
     url = "https://api.meeff.com/user/explore/v2?lng=-112.0613784790039&unreachableUserIds=&lat=33.437198638916016&locale=en"
     
-    # Get the consistent device info for this specific token from the database
     device_info = await get_or_create_device_info_for_token(user_id, token)
     
     base_headers = {
         'User-Agent': "okhttp/4.12.0",
         'meeff-access-token': token
     }
-    # Inject the device info into the headers
     headers = get_headers_with_device_info(base_headers, device_info)
     
     try:
@@ -69,30 +67,28 @@ async def fetch_users(session, token, user_id):
 
 def format_user(user):
     def time_ago(dt_str):
-        if not dt_str:
-            return "N/A"
+        if not dt_str: return "N/A"
         try:
             dt = parser.isoparse(dt_str)
             now = datetime.now(timezone.utc)
             diff = now - dt
             minutes = int(diff.total_seconds() // 60)
-            if minutes < 1:
-                return "just now"
-            elif minutes < 60:
-                return f"{minutes} min ago"
+            if minutes < 1: return "just now"
+            if minutes < 60: return f"{minutes} min ago"
             hours = minutes // 60
-            if hours < 24:
-                return f"{hours} hr ago"
+            if hours < 24: return f"{hours} hr ago"
             days = hours // 24
             return f"{days} day(s) ago"
-        except Exception:
-            return "unknown"
+        except Exception: return "unknown"
+
     last_active = time_ago(user.get("recentAt"))
     nationality = html.escape(user.get('nationalityCode', 'N/A'))
     height = html.escape(str(user.get('height', 'N/A')))
     if "|" in height:
         height_val, height_unit = height.split("|", 1)
         height = f"{height_val.strip()} {height_unit.strip()}"
+        
+    # We remove the "Photos: ..." line because the photo will be sent directly
     return (
         f"<b>Name:</b> {html.escape(user.get('name', 'N/A'))}\n"
         f"<b>ID:</b> <code>{html.escape(user.get('_id', 'N/A'))}</code>\n"
@@ -104,21 +100,9 @@ def format_user(user):
         f"<b>Profile Score:</b> {html.escape(str(user.get('profileScore', 'N/A')))}\n"
         f"<b>Distance:</b> {html.escape(str(user.get('distance', 'N/A')))} km\n"
         f"<b>Language Codes:</b> {html.escape(', '.join(user.get('languageCodes', [])))}\n"
-        f"<b>Last Active:</b> {last_active}\n"
-        "Photos: " + ' '.join([f"<a href='{html.escape(url)}'>Photo</a>" for url in user.get('photoUrls', [])])
+        f"<b>Last Active:</b> {last_active}"
     )
 
-def format_time_used(start_time, end_time):
-    delta = end_time - start_time
-    total_seconds = int(delta.total_seconds())
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours > 0:
-        return f"{hours}h {minutes}m {seconds}s"
-    elif minutes > 0:
-        return f"{minutes}m {seconds}s"
-    else:
-        return f"{seconds}s"
 async def process_users(session, users, token, user_id, bot, token_name, already_sent_ids, lock):
     """Process a batch of users, sending friend requests and handling spam filters atomically."""
     state = user_states[user_id]
@@ -129,12 +113,10 @@ async def process_users(session, users, token, user_id, bot, token_name, already
     is_spam_filter_enabled = await get_individual_spam_filter(user_id, "request")
     ids_to_persist = []
 
-    # Get device info once for this entire batch for consistency
     device_info = await get_or_create_device_info_for_token(user_id, token)
 
     for user in users:
-        if not state["running"]:
-            break
+        if not state["running"]: break
 
         user_id_to_check = user["_id"]
 
@@ -146,8 +128,6 @@ async def process_users(session, users, token, user_id, bot, token_name, already
                 already_sent_ids.add(user_id_to_check)
         
         url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user_id_to_check}&isOkay=1"
-        
-        # Use consistent device headers for the friend request action
         base_headers = {"meeff-access-token": token}
         headers = get_headers_with_device_info(base_headers, device_info)
 
@@ -163,14 +143,24 @@ async def process_users(session, users, token, user_id, bot, token_name, already
                 if is_spam_filter_enabled:
                     ids_to_persist.append(user_id_to_check)
 
+                # --- NEW FASTER METHOD ---
                 details = format_user(user)
-                
-                await bot.send_message(
-                    chat_id=user_id, 
-                    text=details, 
-                    parse_mode="HTML", 
-                    disable_web_page_preview=False
-                )
+                first_photo_url = user.get('photoUrls', [None])[0]
+
+                if first_photo_url:
+                    await bot.send_photo(
+                        chat_id=user_id,
+                        photo=first_photo_url,
+                        caption=details,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=details,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True
+                    )
                 
                 added_count += 1
                 state["total_added_friends"] += 1
