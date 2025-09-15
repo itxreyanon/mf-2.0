@@ -14,7 +14,9 @@ from db import (
     set_token,
     set_info_card,
     set_signup_config,
-    get_signup_config
+    get_signup_config,
+    get_used_email_variations,
+    add_used_email_variation
 )
 
 # Logging configuration
@@ -324,17 +326,32 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         nationality = state.get('multi_nationality', 'US')
         photos = state.get('multi_photos', [])
         
-        email_variations = generate_email_variations(config.get("email", ""), count * 5)
-        created_accounts, email_idx = [], 0
-        
-        while len(created_accounts) < count and email_idx < len(email_variations):
-            email = email_variations[email_idx]
-            email_idx += 1
-            is_available, _ = await check_email_exists(email)
-            if not is_available:
-                continue
+        # New robust logic to check for available emails
+        base_email = config.get("email")
+        if not base_email:
+            await callback.message.edit_text("<b>Error:</b> Base email not configured.", reply_markup=SIGNUP_MENU, parse_mode="HTML")
+            return True
 
-            current_name = names[len(created_accounts) % len(names)].strip()
+        email_variations = generate_email_variations(base_email, count * 5)
+        used_emails = await get_used_email_variations(user_id, base_email)
+        
+        available_emails = []
+        for email in email_variations:
+            if email in used_emails:
+                continue
+            is_available, _ = await check_email_exists(email)
+            if is_available:
+                available_emails.append(email)
+            if len(available_emails) >= count:
+                break
+        
+        if not available_emails:
+            await callback.message.edit_text("<b>Error:</b> Could not find any available email variations.", reply_markup=SIGNUP_MENU, parse_mode="HTML")
+            return True
+        
+        created_accounts = []
+        for i, email in enumerate(available_emails):
+            current_name = names[i % len(names)].strip()
             acc_state = {
                 "email": email,
                 "password": config.get("password"),
@@ -347,6 +364,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             }
             res = await try_signup(acc_state, user_id)
             if res.get("user", {}).get("_id"):
+                await add_used_email_variation(user_id, base_email, email)
                 created_accounts.append({
                     "email": email,
                     "name": current_name,
@@ -377,7 +395,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
 
         result_text = (
             f"<b>Multi Signup Results</b>\n\n"
-            f"<b>Created:</b> {len(verified_accounts) + len(pending_accounts)} of {count} accounts\n"
+            f"<b>Created:</b> {len(created_accounts)} of {count} accounts\n"
             f"<b>Verified & Saved:</b> {len(verified_accounts)}\n"
             f"<b>Pending Verification:</b> {len(pending_accounts)}\n\n"
         )
