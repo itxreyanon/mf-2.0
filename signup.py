@@ -8,16 +8,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dateutil import parser
-import logging
 from device_info import get_or_create_device_info_for_email, get_api_payload_with_device_info
-from db import (
-    set_token,
-    set_info_card,
-    set_signup_config,
-    get_signup_config,
-    get_used_email_variations,
-    add_used_email_variation
-)
+from db import set_token, set_info_card, set_signup_config, get_signup_config
 
 # Logging configuration
 logger = logging.getLogger(__name__)
@@ -40,9 +32,8 @@ DEFAULT_PHOTOS = (
 # Global state
 user_signup_states: Dict[int, Dict] = {}
 
-
 def get_nationality_keyboard() -> InlineKeyboardMarkup:
-    """Creates an inline keyboard for selecting nationality during multi-signup."""
+    """Creates an inline keyboard for selecting nationality."""
     countries = [
         ("RU", "🇷🇺"), ("UA", "🇺🇦"), ("BY", "🇧🇾"), ("IR", "🇮🇷"), ("PH", "🇵🇭"),
         ("PK", "🇵🇰"), ("US", "🇺🇸"), ("IN", "🇮🇳"), ("DE", "🇩🇪"), ("FR", "🇫🇷"),
@@ -50,32 +41,28 @@ def get_nationality_keyboard() -> InlineKeyboardMarkup:
         ("AU", "🇦🇺"), ("IT", "🇮🇹"), ("ES", "🇪🇸"), ("ZA", "🇿🇦"), ("TR", "🇹🇷")
     ]
     keyboard = []
-    # "All Nationalities" button that selects a default (US)
-    keyboard.append([InlineKeyboardButton(text="🌎 All Nationalities (Default)", callback_data="multi_nationality_US")])
-
+    keyboard.append([InlineKeyboardButton(text="🌎 Default (US)", callback_data="nationality_US")])
     NATIONALITIES_PER_ROW = 5
     row = []
     for code, flag in countries:
         row.append(InlineKeyboardButton(
             text=f"{flag} {code}",
-            callback_data=f"multi_nationality_{code}"
+            callback_data=f"nationality_{code}"
         ))
         if len(row) == NATIONALITIES_PER_ROW:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-
     keyboard.append([InlineKeyboardButton(text="Back", callback_data="signup_menu")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def get_multi_signup_confirm_keyboard(count: int) -> InlineKeyboardMarkup:
-    """Generates the confirmation keyboard for multi-signup with a dynamic account count."""
+def get_signup_confirm_keyboard(count: int) -> InlineKeyboardMarkup:
+    """Generates the confirmation keyboard for signup with dynamic account count."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"Create {count} Accounts", callback_data="multi_signup_confirm")],
+        [InlineKeyboardButton(text=f"Create {count} Account{'s' if count != 1 else ''}", callback_data="signup_confirm")],
         [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
     ])
-
 
 # Inline Keyboard Menus
 SIGNUP_MENU = InlineKeyboardMarkup(inline_keyboard=[
@@ -83,9 +70,7 @@ SIGNUP_MENU = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="Sign Up", callback_data="signup_go"),
         InlineKeyboardButton(text="Sign In", callback_data="signin_go")
     ],
-    [
-        InlineKeyboardButton(text="Signup Config", callback_data="signup_settings")
-    ],
+    [InlineKeyboardButton(text="Signup Config", callback_data="signup_settings")],
     [InlineKeyboardButton(text="Back to Main Menu", callback_data="back_to_menu")]
 ])
 
@@ -94,8 +79,8 @@ VERIFY_BUTTON = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
 
-REVERIFY_BUTTON = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Re-verify Pending Accounts", callback_data="reverify_pending")],
+MULTI_VERIFY_BUTTON = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Verify All Emails", callback_data="signup_verify")],
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
 
@@ -109,11 +94,6 @@ BACK_TO_CONFIG = InlineKeyboardMarkup(inline_keyboard=[
 
 DONE_PHOTOS = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Done", callback_data="signup_photos_done")],
-    [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
-])
-
-MULTI_DONE_PHOTOS = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Done", callback_data="multi_signup_photos_done")],
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
 
@@ -158,14 +138,14 @@ def format_user_with_nationality(user: Dict) -> str:
 
     if user.get('photoUrls'):
         card += f"<b>📸 Photos:</b> " + ' '.join([f"<a href='{url}'>📷</a>" for url in user.get('photoUrls', [])])
-
+    
     if "email" in user:
         card += f"\n\n<b>📧 Email:</b> <code>{user['email']}</code>"
     if "password" in user:
         card += f"\n<b>🔐 Password:</b> <code>{user['password']}</code>"
     if "token" in user:
         card += f"\n<b>🔑 Token:</b> <code>{user['token']}</code>"
-
+    
     return card
 
 def generate_email_variations(base_email: str, count: int = 50) -> List[str]:
@@ -208,24 +188,26 @@ async def check_email_exists(email: str) -> Tuple[bool, str]:
             logger.error(f"Error checking email {email}: {e}")
             return False, "Failed to check email availability."
 
-async def show_multi_signup_preview(message: Message, user_id: int, state: Dict) -> None:
-    """Show a preview of the multi-signup configuration."""
+async def show_signup_preview(message: Message, user_id: int, state: Dict) -> None:
+    """Show a preview of the signup configuration."""
     config = await get_signup_config(user_id) or {}
-    count = state.get("multi_count", 1)
-    names = state.get("multi_names", ['N/A'])
+    count = state.get("account_count", 1)
+    names = state.get("account_names", [])
+    nationality = state.get("nationality", config.get("nationality", "US"))
     email_variations = generate_email_variations(config.get("email", ""), count)
     preview_text = (
-        f"<b>Multi Signup Preview ({count} Accounts)</b>\n\n"
-        f"<b>Names:</b> {', '.join(names)}\n"
-        f"<b>Nationality:</b> {state.get('multi_nationality', 'N/A')}\n"
-        f"<b>Photos:</b> {len(state.get('multi_photos', []))} uploaded\n"
+        f"<b>Signup Preview ({count} Account{'s' if count != 1 else ''})</b>\n\n"
+        f"<b>Nationality:</b> {nationality.upper()}\n"
+        f"<b>Photos:</b> {len(state.get('photos', []))} uploaded\n"
         f"<b>Gender:</b> {config.get('gender', 'N/A')}\n"
         f"<b>Birth Year:</b> {config.get('birth_year', 'N/A')}\n\n"
-        f"<b>Example Email Variations:</b>\n" +
-        '\n'.join([f"• {email}" for email in email_variations[:5]]) +
-        f"\n\nConfirm to create these {count} accounts."
+        f"<b>Account Names:</b>\n" +
+        (f"• {names[0]}" if len(names) == 1 else '\n'.join([f"• {name.strip()}" for name in names])) +
+        f"\n\n<b>Example Email Variations:</b>\n" +
+        '\n'.join([f"• {email}" for email in email_variations[:min(count, 5)]]) +
+        f"\n\nConfirm to create {count} account{'s' if count != 1 else ''}."
     )
-    await message.edit_text(preview_text, reply_markup=get_multi_signup_confirm_keyboard(count), parse_mode="HTML")
+    await message.edit_text(preview_text, reply_markup=get_signup_confirm_keyboard(count), parse_mode="HTML")
 
 async def signup_settings_command(message: Message, is_callback: bool = False) -> None:
     """Display and manage signup configuration settings."""
@@ -269,11 +251,11 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
     user_id = callback.from_user.id
     state = user_signup_states.get(user_id, {})
     data = callback.data
-    config = await get_signup_config(user_id) or {}
 
     if data == "signup_settings":
         await signup_settings_command(callback.message, is_callback=True)
     elif data == "toggle_auto_signup":
+        config = await get_signup_config(user_id) or {}
         config['auto_signup'] = not config.get('auto_signup', False)
         await set_signup_config(user_id, config)
         await callback.answer(f"Auto Signup turned {'ON' if config['auto_signup'] else 'OFF'}")
@@ -287,71 +269,59 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             parse_mode="HTML"
         )
     elif data == "signup_go":
-        if not all(k in config for k in ['email', 'password', 'gender', 'birth_year']):
+        config = await get_signup_config(user_id) or {}
+        if config.get('auto_signup', False) and all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
+            state["stage"] = "ask_count"
             await callback.message.edit_text(
-                "<b>Configuration Incomplete</b>\n\nPlease set up Email, Password, Gender, and Birth Year in <b>Signup Config</b> first.",
-                reply_markup=SIGNUP_MENU,
-                parse_mode="HTML"
-            )
-        else:
-            state["stage"] = "multi_ask_count"
-            user_signup_states[user_id] = state
-            await callback.message.edit_text(
-                "<b>Multi Signup (Step 1/4)</b>\n\nEnter the number of accounts you want to create (e.g., 10).",
+                "<b>Signup (Step 1/4)</b>\n\nEnter the number of accounts to create (e.g., 1 for single, 6 for batch, or more):",
                 reply_markup=BACK_TO_SIGNUP,
                 parse_mode="HTML"
             )
-    elif data.startswith("multi_nationality_"):
+        else:
+            if config.get('auto_signup', False):
+                await callback.answer(
+                    "Auto Signup is ON, but config is incomplete. Starting manual setup.",
+                    show_alert=True
+                )
+            state["stage"] = "ask_email"
+            await callback.message.edit_text(
+                "<b>Manual Signup</b>\n\nPlease enter your email address:",
+                reply_markup=BACK_TO_SIGNUP,
+                parse_mode="HTML"
+            )
+    elif data.startswith("nationality_"):
         code = data.split("_")[-1]
-        state["multi_nationality"] = code
-        state["stage"] = "multi_ask_names"
+        state["nationality"] = code
+        state["stage"] = "ask_names"
         user_signup_states[user_id] = state
         await callback.message.edit_text(
             (
-                f"<b>Multi Signup (Step 3/4)</b>\n\n"
+                f"<b>Signup (Step 2/4)</b>\n\n"
                 f"Nationality set to: <b>{code}</b>\n\n"
                 "Enter the name(s) for the accounts:\n"
-                "• For one name on all accounts, just type the name (e.g., <code>David</code>).\n"
-                "• For different names, type names separated by commas (e.g., <code>David, Mike, John</code>)."
+                "• For one name on all accounts, type the name (e.g., <code>David</code>).\n"
+                "• For 6 accounts, you may enter 6 names separated by commas (e.g., <code>David, Mike, John, Chris, Alex, Sam</code>)."
             ),
             parse_mode="HTML"
         )
-    elif data == "multi_signup_photos_done":
-        await show_multi_signup_preview(callback.message, user_id, state)
-    elif data == "multi_signup_confirm":
-        await callback.message.edit_text("<b>Creating Accounts</b>...", parse_mode="HTML")
-        
-        count = state.get("multi_count", 1)
-        names = state.get('multi_names', [])
-        nationality = state.get('multi_nationality', 'US')
-        photos = state.get('multi_photos', [])
-        
-        # New robust logic to check for available emails
-        base_email = config.get("email")
-        if not base_email:
-            await callback.message.edit_text("<b>Error:</b> Base email not configured.", reply_markup=SIGNUP_MENU, parse_mode="HTML")
-            return True
-
-        email_variations = generate_email_variations(base_email, count * 5)
-        used_emails = await get_used_email_variations(user_id, base_email)
-        
-        available_emails = []
-        for email in email_variations:
-            if email in used_emails:
-                continue
+    elif data == "signup_photos_done":
+        await show_signup_preview(callback.message, user_id, state)
+    elif data == "signup_confirm":
+        count = state.get("account_count", 1)
+        await callback.message.edit_text(f"<b>Creating {count} Account{'s' if count != 1 else ''}</b>...", parse_mode="HTML")
+        config = await get_signup_config(user_id) or {}
+        email_variations = generate_email_variations(config.get("email", ""), count * 5)
+        names = state.get("account_names", [])
+        nationality = state.get("nationality", config.get("nationality", "US"))
+        photos = state.get("photos", [])
+        created_accounts, email_idx = [], 0
+        while len(created_accounts) < count and email_idx < len(email_variations):
+            email = email_variations[email_idx]
+            email_idx += 1
             is_available, _ = await check_email_exists(email)
-            if is_available:
-                available_emails.append(email)
-            if len(available_emails) >= count:
-                break
-        
-        if not available_emails:
-            await callback.message.edit_text("<b>Error:</b> Could not find any available email variations.", reply_markup=SIGNUP_MENU, parse_mode="HTML")
-            return True
-        
-        created_accounts = []
-        for i, email in enumerate(available_emails):
-            current_name = names[i % len(names)].strip()
+            if not is_available:
+                continue
+            current_name = names[0] if len(names) == 1 else names[len(created_accounts)]
             acc_state = {
                 "email": email,
                 "password": config.get("password"),
@@ -364,15 +334,43 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             }
             res = await try_signup(acc_state, user_id)
             if res.get("user", {}).get("_id"):
-                await add_used_email_variation(user_id, base_email, email)
                 created_accounts.append({
                     "email": email,
                     "name": current_name,
                     "password": config.get("password")
                 })
-        
-        pending_accounts = []
-        verified_accounts = []
+        state["created_accounts"] = created_accounts
+        result_text = (
+            f"<b>Signup Results</b>\n\n<b>Created:</b> {len(created_accounts)} of {count} accounts\n\n"
+        )
+        if created_accounts:
+            result_text += "<b>Created Accounts:</b>\n" + '\n'.join([
+                f"• {a['name']} - <code>{a['email']}</code>" for a in created_accounts
+            ])
+            result_text += "\n\nPlease verify all emails, then click the button below."
+            await callback.message.edit_text(
+                result_text,
+                reply_markup=MULTI_VERIFY_BUTTON if count > 1 else VERIFY_BUTTON,
+                parse_mode="HTML"
+            )
+        else:
+            result_text += "\nNo accounts created. Please try again."
+            await callback.message.edit_text(
+                result_text,
+                reply_markup=SIGNUP_MENU,
+                parse_mode="HTML"
+            )
+        state["stage"] = "await_verify"
+    elif data == "signup_verify":
+        created_accounts = state.get("created_accounts", [])
+        if not created_accounts:
+            creds = state.get("creds")
+            if not creds:
+                await callback.answer("No accounts to verify.", show_alert=True)
+                return True
+            created_accounts = [{"email": creds["email"], "password": creds["password"], "name": creds["name"]}]
+        await callback.message.edit_text("<b>Verifying Account(s)</b>...", parse_mode="HTML")
+        verified, failed = [], []
         for acc in created_accounts:
             res = await try_signin(acc["email"], acc["password"], user_id)
             if res.get("accessToken"):
@@ -384,64 +382,24 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                         "token": res["accessToken"]
                     })
                     await set_info_card(user_id, res["accessToken"], format_user_with_nationality(res["user"]), acc["email"])
-                verified_accounts.append(acc)
+                verified.append(acc)
             else:
-                pending_accounts.append(acc)
-
-        # Update persistent storage with pending accounts
-        current_config = await get_signup_config(user_id) or {}
-        current_config['pending_accounts'] = pending_accounts
-        await set_signup_config(user_id, current_config)
-
+                failed.append(acc)
         result_text = (
-            f"<b>Multi Signup Results</b>\n\n"
-            f"<b>Created:</b> {len(created_accounts)} of {count} accounts\n"
-            f"<b>Verified & Saved:</b> {len(verified_accounts)}\n"
-            f"<b>Pending Verification:</b> {len(pending_accounts)}\n\n"
+            f"<b>Signup Complete!</b>\n\n"
+            f"<b>Verified & Saved:</b> {len(verified)}\n"
+            f"<b>Pending Verification:</b> {len(failed)}\n\n"
         )
-        if verified_accounts:
-            result_text += "<b>Added:</b>\n" + '\n'.join([f"• {a['name']}" for a in verified_accounts])
-        if pending_accounts:
-            result_text += "\n<b>Still Pending:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in pending_accounts])
-            await callback.message.edit_text(result_text, reply_markup=REVERIFY_BUTTON, parse_mode="HTML")
-        else:
-            await callback.message.edit_text(result_text, reply_markup=SIGNUP_MENU, parse_mode="HTML")
-    elif data == "reverify_pending":
-        await callback.message.edit_text("<b>Re-verifying Accounts</b>...", parse_mode="HTML")
-        config = await get_signup_config(user_id) or {}
-        pending_accounts = config.get("pending_accounts", [])
-        
-        if not pending_accounts:
-            await callback.answer("No accounts to re-verify.", show_alert=True)
-            await callback.message.edit_text("<b>All accounts verified!</b>", reply_markup=SIGNUP_MENU, parse_mode="HTML")
-            return True
-
-        new_pending, verified_count = [], 0
-        for acc in pending_accounts:
-            res = await try_signin(acc["email"], acc["password"], user_id)
-            if res.get("accessToken"):
-                await set_token(user_id, res["accessToken"], acc["name"], acc["email"])
-                if res.get("user"):
-                    res["user"].update({"email": acc["email"], "password": acc["password"], "token": res["accessToken"]})
-                    await set_info_card(user_id, res["accessToken"], format_user_with_nationality(res["user"]), acc["email"])
-                verified_count += 1
-            else:
-                new_pending.append(acc)
-        
-        config['pending_accounts'] = new_pending
-        await set_signup_config(user_id, config)
-        
-        result_text = (
-            f"<b>Re-verification Complete!</b>\n\n"
-            f"<b>Successfully Verified:</b> {verified_count}\n"
-            f"<b>Still Pending:</b> {len(new_pending)}\n"
+        if verified:
+            result_text += "<b>Added:</b>\n" + '\n'.join([f"• {a['name']}" for a in verified])
+        if failed:
+            result_text += "\n<b>Still Pending:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in failed])
+        await callback.message.edit_text(
+            result_text,
+            reply_markup=SIGNUP_MENU,
+            parse_mode="HTML"
         )
-        if new_pending:
-            result_text += "\n<b>Pending Accounts:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in new_pending])
-            await callback.message.edit_text(result_text, reply_markup=REVERIFY_BUTTON, parse_mode="HTML")
-        else:
-            result_text += "\n\n<b>All pending accounts have been verified!</b>"
-            await callback.message.edit_text(result_text, reply_markup=SIGNUP_MENU, parse_mode="HTML")
+        state["stage"] = "menu"
     elif data == "signin_go":
         state["stage"] = "signin_email"
         await callback.message.edit_text(
@@ -449,68 +407,13 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             reply_markup=BACK_TO_SIGNUP,
             parse_mode="HTML"
         )
-    elif data == "signup_verify":
-        creds = state.get("creds")
-        if not creds:
-            await callback.answer("No signup info. Please start over.", show_alert=True)
-            return True
-        await callback.message.edit_text("<b>Verifying Account</b>...", parse_mode="HTML")
-        res = await try_signin(creds['email'], creds['password'], user_id)
-        if res.get("accessToken"):
-            await store_token_and_show_card(callback.message, res, creds)
-        else:
-            await callback.message.edit_text(
-                f"<b>Login Failed</b>\n\nError: {res.get('errorMessage', 'Verification likely pending')}",
-                reply_markup=VERIFY_BUTTON,
-                parse_mode="HTML"
-            )
-    elif data == "signup_photos_done":
-        is_auto = state.get("stage") == "auto_signup_ask_photos"
-        msg = await callback.message.edit_text(
-            "<b>Auto Signup</b>\n\nFinding available email and creating account..." if is_auto else "<b>Creating Account</b>...",
+    elif data == "signup_menu":
+        state["stage"] = "menu"
+        await callback.message.edit_text(
+            "<b>Account Creation</b>\n\nChoose an option:",
+            reply_markup=SIGNUP_MENU,
             parse_mode="HTML"
         )
-        if is_auto:
-            available_email = None
-            if config.get("email"):
-                async def find_available():
-                    for email in generate_email_variations(config.get("email"), 50):
-                        if (await check_email_exists(email))[0]:
-                            return email
-                    return None
-                available_email = await find_available()
-
-            if not available_email:
-                await msg.edit_text(
-                    "<b>Signup Failed</b>\n\nCould not find an available email variation.",
-                    reply_markup=SIGNUP_MENU,
-                    parse_mode="HTML"
-                )
-                return True
-            state.update({
-                "email": available_email,
-                "password": config.get("password"),
-                "gender": config.get("gender"),
-                "birth_year": config.get("birth_year"),
-                "nationality": config.get("nationality")
-            })
-        
-        res = await try_signup(state, user_id)
-        if res.get("user", {}).get("_id"):
-            state["creds"] = {"email": state["email"], "password": state["password"], "name": state["name"]}
-            state["stage"] = "await_verify"
-            await msg.edit_text(
-                "<b>Account Created!</b>\n\nPlease verify your email, then click the button below.",
-                reply_markup=VERIFY_BUTTON,
-                parse_mode="HTML"
-            )
-        else:
-            state["stage"] = "menu"
-            await msg.edit_text(
-                f"<b>Signup Failed</b>\n\nError: {res.get('errorMessage', 'Registration failed.')}",
-                reply_markup=SIGNUP_MENU,
-                parse_mode="HTML"
-            )
     else:
         await callback.answer()
         return False
@@ -543,7 +446,7 @@ async def signup_message_handler(message: Message) -> bool:
             await message.answer("<b>Setup Gender</b>\nEnter gender (M/F):", reply_markup=BACK_TO_CONFIG, parse_mode="HTML")
         elif stage == "config_gender":
             if text.upper() not in ("M", "F"):
-                await message.answer("Invalid. Please enter M or F:", parse_mode="HTML")
+                lave message.answer("Invalid. Please enter M or F:", parse_mode="HTML")
                 return True
             config["gender"] = text.upper()
             state["stage"] = "config_birth_year"
@@ -572,124 +475,91 @@ async def signup_message_handler(message: Message) -> bool:
             await message.answer("<b>Configuration Saved!</b>", parse_mode="HTML")
             await signup_settings_command(message)
         await set_signup_config(user_id, config)
-    elif stage in ["ask_email", "ask_password", "ask_name", "ask_gender", "ask_desc"]:
-        if stage == "ask_email":
-            ok, msg = await check_email_exists(text)
-            if not ok:
-                await message.answer(f"<b>Email Error</b>\n\n{msg}", reply_markup=BACK_TO_SIGNUP, parse_mode="HTML")
-                return True
-            state["email"] = text
-            state["stage"] = "ask_password"
-            await message.answer(
-                "<b>Password Setup</b>\nEnter a secure password:",
-                reply_markup=BACK_TO_SIGNUP,
-                parse_mode="HTML"
-            )
-        elif stage == "ask_password":
-            state["password"] = text
-            state["stage"] = "ask_name"
-            await message.answer(
-                "<b>Display Name</b>\nEnter your display name:",
-                reply_markup=BACK_TO_SIGNUP,
-                parse_mode="HTML"
-            )
-        elif stage == "ask_name":
-            state["name"] = text
-            state["stage"] = "ask_gender"
-            await message.answer(
-                "<b>Gender Selection</b>\nEnter your gender (M/F):",
-                reply_markup=BACK_TO_SIGNUP,
-                parse_mode="HTML"
-            )
-        elif stage == "ask_gender":
-            if text.upper() not in ("M", "F"):
-                await message.answer("Invalid. Please enter M or F:", parse_mode="HTML")
-                return True
-            state["gender"] = text.upper()
-            state["stage"] = "ask_desc"
-            await message.answer(
-                "<b>Profile Description</b>\nEnter your profile bio:",
-                reply_markup=BACK_TO_SIGNUP,
-                parse_mode="HTML"
-            )
-        elif stage == "ask_desc":
-            state["desc"] = text
-            state["stage"] = "ask_photos"
-            state["photos"] = []
-            await message.answer(
-                "<b>Profile Photos</b>\n\nSend up to 6 photos. Click 'Done' when finished.",
-                reply_markup=DONE_PHOTOS,
-                parse_mode="HTML"
-            )
-    elif stage == "multi_ask_count":
+    elif stage == "ask_email":
+        ok, msg = await check_email_exists(text)
+        if not ok:
+            await message.answer(f"<b>Email Error</b>\n\n{msg}", reply_markup=BACK_TO_SIGNUP, parse_mode="HTML")
+            return True
+        state["email"] = text
+        state["stage"] = "ask_password"
+        await message.answer(
+            "<b>Password Setup</b>\nEnter a secure password:",
+            reply_markup=BACK_TO_SIGNUP,
+            parse_mode="HTML"
+        )
+    elif stage == "ask_password":
+        state["password"] = text
+        state["stage"] = "ask_count"
+        await message.answer(
+            "<b>Signup (Step 1/4)</b>\n\nEnter the number of accounts to create (e.g., 1 for single, 6 for batch, or more):",
+            reply_markup=BACK_TO_SIGNUP,
+            parse_mode="HTML"
+        )
+    elif stage == "ask_count":
         try:
             count = int(text)
             if not 1 <= count <= 25:
                 raise ValueError()
-            state["multi_count"] = count
-            state["stage"] = "multi_select_nationality"
-            await message.answer(
-                "<b>Multi Signup (Step 2/4)</b>\n\nSelect the nationality for all accounts:",
-                reply_markup=get_nationality_keyboard(),
-                parse_mode="HTML"
-            )
+            state["account_count"] = count
+            config = await get_signup_config(user_id) or {}
+            if count == 6 and not config.get('nationality'):
+                state["stage"] = "select_nationality"
+                await message.answer(
+                    "<b>Signup (Step 2/4)</b>\n\nSelect the nationality for all 6 accounts:",
+                    reply_markup=get_nationality_keyboard(),
+                    parse_mode="HTML"
+                )
+            else:
+                state["nationality"] = config.get("nationality", "US")
+                state["stage"] = "ask_names"
+                await message.answer(
+                    (
+                        f"<b>Signup (Step 2/4)</b>\n\n"
+                        f"Enter the name(s) for {count} account{'s' if count != 1 else ''}:\n"
+                        f"• For one name on all accounts, type the name (e.g., <code>David</code>).\n"
+                        f"• For 6 accounts, you may enter 6 names separated by commas (e.g., <code>David, Mike, John, Chris, Alex, Sam</code>)."
+                    ),
+                    reply_markup=BACK_TO_SIGNUP,
+                    parse_mode="HTML"
+                )
         except ValueError:
             await message.answer("Invalid number. Please enter a number between 1 and 25.", parse_mode="HTML")
             return True
-    elif stage == "multi_ask_names":
-        count = state.get("multi_count", 1)
-        if ',' in text:
+    elif stage == "ask_names":
+        count = state.get("account_count", 1)
+        if count == 6 and ',' in text:
             names = [name.strip() for name in text.split(',') if name.strip()]
-            if not names:
-                await message.answer("Invalid input. Please enter at least one name.", parse_mode="HTML")
+            if len(names) != 6:
+                await message.answer(
+                    f"<b>Invalid Input</b>\n\nYou provided {len(names)} names, but exactly 6 are required when using commas.",
+                    parse_mode="HTML"
+                )
                 return True
-            state["multi_names"] = names
+            state["account_names"] = names
         else:
-            single_name = text.strip()
-            if not single_name:
-                await message.answer("Name cannot be empty. Please try again.", parse_mode="HTML")
-                return True
-            state["multi_names"] = [single_name]
-        
-        state["multi_photos"] = []
-        state["stage"] = "multi_ask_photos"
+            state["account_names"] = [text.strip()] * count
+        state["photos"] = []
+        state["stage"] = "ask_photos"
         await message.answer(
-            f"<b>Multi Signup (Step 4/4)</b>\n\nSend up to 6 photos to be used for all {count} accounts. Click 'Done' when finished.",
-            reply_markup=MULTI_DONE_PHOTOS,
+            f"<b>Signup (Step 3/4)</b>\n\nSend up to 6 photos for the account{'s' if count != 1 else ''}. Click 'Done' when finished.",
+            reply_markup=DONE_PHOTOS,
             parse_mode="HTML"
         )
-    elif stage in ["ask_photos", "auto_signup_ask_photos", "multi_ask_photos"]:
+    elif stage == "ask_photos":
         if message.content_type != "photo":
             await message.answer("Please send a photo or click 'Done'.", parse_mode="HTML")
             return True
-        
-        photo_key = "photos"
-        done_markup = DONE_PHOTOS
-        if stage == "multi_ask_photos":
-            photo_key = "multi_photos"
-            done_markup = MULTI_DONE_PHOTOS
-        
-        if len(state.get(photo_key, [])) >= 6:
+        if len(state.get("photos", [])) >= 6:
             await message.answer("Photo limit reached (6). Click Done.", parse_mode="HTML")
             return True
         photo_url = await upload_tg_photo(message)
         if photo_url:
-            if photo_key not in state:
-                state[photo_key] = []
-            state[photo_key].append(photo_url)
-            await message.answer(f"Photo uploaded ({len(state[photo_key])}/6).", reply_markup=done_markup, parse_mode="HTML")
+            if "photos" not in state:
+                state["photos"] = []
+            state["photos"].append(photo_url)
+            await message.answer(f"Photo uploaded ({len(state['photos'])}/6).", parse_mode="HTML")
         else:
             await message.answer("Upload Failed. Please try again.", parse_mode="HTML")
-    elif stage == "auto_signup_ask_name":
-        state["name"] = text
-        state["desc"] = get_random_bio()
-        state["photos"] = []
-        state["stage"] = "auto_signup_ask_photos"
-        await message.answer(
-            "<b>Profile Photos</b>\n\nSend up to 6 photos. Click 'Done' when finished.",
-            reply_markup=DONE_PHOTOS,
-            parse_mode="HTML"
-        )
     elif stage == "signin_email":
         state["signin_email"] = text
         state["stage"] = "signin_password"
@@ -802,7 +672,7 @@ async def try_signin(email: str, password: str, telegram_user_id: int) -> Dict:
     url = "https://api.meeff.com/user/login/v4"
     
     device_info = await get_or_create_device_info_for_email(telegram_user_id, email)
-
+    
     base_payload = {"provider": "email", "providerId": email, "providerToken": password, "locale": "en"}
     
     payload = get_api_payload_with_device_info(base_payload, device_info)
@@ -816,7 +686,6 @@ async def try_signin(email: str, password: str, telegram_user_id: int) -> Dict:
     except Exception as e:
         logger.error(f"Error during signin: {e}")
         return {"errorMessage": "Failed to sign in."}
-
 
 async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds: Dict) -> None:
     """Store the access token and display the user card."""
