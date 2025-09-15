@@ -24,18 +24,20 @@ async def post_to_lounge(session, token, message, user_id):
     headers = get_headers_with_device_info(base_headers, device_info)
     
     try:
-        # The 'await' here is critical. It executes the web request.
         async with session.post(url, json=payload, headers=headers) as response:
             if response.status == 200:
+                # --- FIX APPLIED HERE ---
                 logging.info(f"Lounge post successful for token {token[:10]}...")
                 return True, "Success"
             else:
                 resp_json = await response.json()
                 error_message = resp_json.get("errorMessage", f"HTTP {response.status}")
-                logging.error(f"Failed to post to lounge for token {token[:10]...}: {error_message}")
+                # --- FIX APPLIED HERE ---
+                logging.error(f"Failed to post to lounge for token {token[:10]}...: {error_message}")
                 return False, error_message
     except Exception as e:
-        logging.error(f"Exception posting to lounge for token {token[:10]...}: {e}")
+        # --- FIX APPLIED HERE ---
+        logging.error(f"Exception posting to lounge for token {token[:10]}...: {e}")
         return False, str(e)
 
 async def send_lounge(token: str, custom_message: str, status_message: Message, bot: Bot, user_id: int, spam_enabled: bool):
@@ -44,7 +46,6 @@ async def send_lounge(token: str, custom_message: str, status_message: Message, 
         success, reason = await post_to_lounge(session, token, custom_message, user_id)
         
         if success:
-            # The 'await' here executes the message edit.
             await status_message.edit_text("✅ <b>Lounge Message Sent!</b>", parse_mode="HTML")
         else:
             await status_message.edit_text(f"❌ <b>Failed:</b> {html.escape(reason)}", parse_mode="HTML")
@@ -60,7 +61,6 @@ async def send_lounge_all_tokens(active_tokens_data: list, custom_message: str, 
             token = token_data['token']
             name = token_data.get('name', f"Account {i}")
             
-            # The 'await' here executes the status update.
             await status.edit_text(
                 f"🔄 <b>Processing:</b> {i}/{total_tokens}\n"
                 f"<b>Account:</b> {html.escape(name)}",
@@ -74,7 +74,9 @@ async def send_lounge_all_tokens(active_tokens_data: list, custom_message: str, 
             else:
                 failure_count += 1
             
-            await asyncio.sleep(1) # Small delay between accounts
+            # Small delay between accounts to avoid rate-limiting
+            if total_tokens > 1:
+                await asyncio.sleep(1) 
 
     final_message = (
         f"✅ <b>Lounge Messaging Complete!</b>\n\n"
