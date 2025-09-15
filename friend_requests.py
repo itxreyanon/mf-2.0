@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 
 # ✅ Speed configuration
-PER_USER_DELAY = 0.5      # Delay between sending requests to individual users
+PER_USER_DELAY = 1      # Delay between sending requests to individual users
 PER_BATCH_DELAY = 1       # Delay between fetching new batches of users
 EMPTY_BATCH_DELAY = 2     # Delay after receiving an empty batch
 PER_ERROR_DELAY = 5       # Delay after a network or API error
