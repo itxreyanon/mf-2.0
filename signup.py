@@ -726,4 +726,4 @@ async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds:
             "<b>Error</b>\n\nToken not received, failed to save account.",
             parse_mode="HTML"
         )
-</x
+
