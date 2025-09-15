@@ -1,4 +1,3 @@
-# main.py
 import asyncio
 import logging
 from datetime import datetime, timedelta
@@ -138,7 +137,8 @@ async def send_lounge_all(message: Message):
 
     spam_enabled = await get_individual_spam_filter(user_id, "lounge")
     status = await message.reply(f"<b>Starting Lounge Messages</b> for {len(active_tokens_data)} accounts...", parse_mode="HTML")
-    await send_lounge_all_tokens(active_tokens_data, custom_message, status, bot, user_id, spam_enabled)
+    # FIX: Added 'user_id' as the last argument
+    await send_lounge_all_tokens(active_tokens_data, custom_message, status, bot, user_id, spam_enabled, user_id)
 
 @router.message(Command("lounge"))
 async def lounge_command(message: Message):
@@ -153,7 +153,9 @@ async def lounge_command(message: Message):
     custom_message = parts[1]
     spam_enabled = await get_individual_spam_filter(user_id, "lounge")
     status_message = await message.reply(f"<b>Starting Lounge Messaging...</b>", parse_mode="HTML")
-    await send_lounge(token, custom_message, status_message, bot, user_id, spam_enabled)
+    # FIX: Added 'user_id' as the last argument
+    await send_lounge(token, custom_message, status_message, bot, user_id, spam_enabled, user_id)
+
 
 @router.message(Command("chatroom"))
 async def send_to_all_command(message: Message):
