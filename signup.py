@@ -191,8 +191,20 @@ async def check_email_exists(email: str) -> Tuple[bool, str]:
             logger.error(f"Error checking email {email}: {e}")
             return False, "Failed to check email availability."
 
+async def select_available_emails(base_email: str, num_accounts: int) -> List[str]:
+    """Select the exact available email variations to be used for account creation."""
+    email_variations = generate_email_variations(base_email, num_accounts * 10)
+    available_emails = []
+    for email in email_variations:
+        if len(available_emails) >= num_accounts:
+            break
+        is_available, _ = await check_email_exists(email)
+        if is_available:
+            available_emails.append(email)
+    return available_emails
+
 async def show_signup_preview(message: Message, user_id: int, state: Dict) -> None:
-    """Show a preview of the signup configuration."""
+    """Show a preview of the signup configuration with exact emails to be used."""
     config = await get_signup_config(user_id) or {}
     if not all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
         await message.edit_text(
@@ -202,7 +214,8 @@ async def show_signup_preview(message: Message, user_id: int, state: Dict) -> No
         )
         return
     num_accounts = state.get('num_accounts', 1)
-    email_variations = generate_email_variations(config.get("email", ""), num_accounts * 10)
+    available_emails = await select_available_emails(config.get("email", ""), num_accounts)
+    state["selected_emails"] = available_emails  # Store selected emails for creation
     filter_nat = state.get('filter_nationality', 'All Countries')
     preview_text = (
         f"<b>Signup Preview</b>\n\n"
@@ -213,16 +226,17 @@ async def show_signup_preview(message: Message, user_id: int, state: Dict) -> No
         f"<b>Birth Year:</b> {config.get('birth_year', 'N/A')}\n"
         f"<b>Nationality:</b> {config.get('nationality', 'N/A')}\n"
         f"<b>Filter Nationality:</b> {filter_nat}\n\n"
-        f"<b>Example Email Variations:</b>\n" +
-        '\n'.join([f"{i+1}. {email}" for i, email in enumerate(email_variations[:min(5, len(email_variations))])]) +
-        f"\n\n<b>Ready to create {num_accounts} account{'s' if num_accounts > 1 else ''}?</b>"
+        f"<b>Emails to be Used:</b>\n" +
+        (f"\n{'No available emails found!' if not available_emails else '\n'.join([f'{i+1}. {email}' for i, email in enumerate(available_emails)])}") +
+        f"\n\n<b>Ready to create {len(available_emails)} of {num_accounts} requested account{'s' if num_accounts > 1 else ''}?</b>"
     )
-    confirm_text = f"Create {num_accounts} Account{'s' if num_accounts > 1 else ''}"
+    confirm_text = f"Create {len(available_emails)} Account{'s' if len(available_emails) != 1 else ''}"
     menu = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=confirm_text, callback_data="create_accounts_confirm")],
         [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
     ])
     await message.edit_text(preview_text, reply_markup=menu, parse_mode="HTML")
+    user_signup_states[user_id] = state
 
 async def signup_settings_command(message: Message, is_callback: bool = False) -> None:
     """Display and manage signup configuration settings."""
@@ -314,14 +328,16 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         await callback.message.edit_text("<b>Creating Accounts</b>...", parse_mode="HTML")
         config = await get_signup_config(user_id) or {}
         num_accounts = state.get("num_accounts", 1)
-        email_variations = generate_email_variations(config.get("email", ""), num_accounts * 10)
-        created_accounts, email_idx = [], 0
-        while len(created_accounts) < num_accounts and email_idx < len(email_variations):
-            email = email_variations[email_idx]
-            email_idx += 1
-            is_available, _ = await check_email_exists(email)
-            if not is_available:
-                continue
+        selected_emails = state.get("selected_emails", [])
+        if not selected_emails:
+            await callback.message.edit_text(
+                "<b>No Available Emails</b>\n\nNo valid email variations found. Please try a different base email.",
+                reply_markup=SIGNUP_MENU,
+                parse_mode="HTML"
+            )
+            return True
+        created_accounts = []
+        for email in selected_emails[:num_accounts]:
             acc_state = {
                 "email": email,
                 "password": config.get("password"),
@@ -358,13 +374,16 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
     elif data == "verify_accounts" or data == "retry_pending":
         pending = state.get("pending_accounts", [])
         if not pending:
-            await callback.answer("No accounts to verify.", show_alert=True)
+            await callback.message.edit_text(
+                "<b>No Pending Accounts</b>\n\nAll accounts are either verified or none were created.",
+                reply_markup=SIGNUP_MENU,
+                parse_mode="HTML"
+            )
             return True
         await callback.message.edit_text("<b>Verifying Accounts</b>...", parse_mode="HTML")
         verified = state.get("verified_accounts", [])
         new_pending = []
         filter_nat = state.get("filter_nationality", "")
-        errors = []
         for acc in pending:
             res = await try_signin(acc["email"], acc["password"], user_id)
             if res.get("accessToken") and res.get("user"):
@@ -380,22 +399,23 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 verified.append(acc)
             else:
                 new_pending.append(acc)
-                error_msg = res.get("errorMessage", "Verification failed, likely pending email confirmation.")
-                errors.append(f"• <code>{acc['email']}</code>: {error_msg}")
         state["verified_accounts"] = verified
         state["pending_accounts"] = new_pending
-        result_text = (
-            f"<b>Verification Results</b>\n\n"
-            f"<b>Verified & Saved:</b> {len(verified)}\n"
-            f"<b>Pending Verification:</b> {len(new_pending)}\n\n"
-        )
-        if verified:
-            result_text += "<b>Verified Accounts:</b>\n" + '\n'.join([f"• {a['name']} - <code>{a['email']}</code>" for a in verified])
-        if new_pending:
-            result_text += "\n<b>Pending Verification:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in new_pending])
-        if errors:
-            result_text += "\n<b>Errors:</b>\n" + '\n'.join(errors)
-        reply_markup = RETRY_VERIFY_BUTTON if new_pending else SIGNUP_MENU
+        if not new_pending:
+            result_text = (
+                f"<b>Verification Results</b>\n\n"
+                f"<b>All Accounts Verified:</b> {len(verified)} account{'s' if len(verified) != 1 else ''}\n\n"
+                "All accounts have been successfully verified and saved."
+            )
+            reply_markup = SIGNUP_MENU
+        else:
+            result_text = (
+                f"<b>Verification Results</b>\n\n"
+                f"<b>Pending Verification:</b> {len(new_pending)} account{'s' if len(new_pending) != 1 else ''}\n\n"
+                "<b>Pending Accounts:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in new_pending]) +
+                "\n\nPlease verify these emails, then retry."
+            )
+            reply_markup = RETRY_VERIFY_BUTTON
         await callback.message.edit_text(
             result_text,
             reply_markup=reply_markup,
