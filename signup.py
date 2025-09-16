@@ -191,7 +191,7 @@ async def check_email_exists(email: str) -> Tuple[bool, str]:
         try:
             async with session.post(url, json=payload, headers=headers) as response:
                 resp_json = await response.json()
-                if response.status == 406 or resp_json.get("errorCode") == "AlreadyInUse":
+                if response.status == 406 or resp_json.get("errorMessage") == "This email is already in use.":
                     return False, resp_json.get("errorMessage", "This email is already in use.")
                 return True, ""
         except Exception as e:
@@ -478,7 +478,7 @@ async def signup_message_handler(message: Message) -> bool:
     user_id = message.from_user.id
     if user_id not in user_signup_states:
         return False
-    state = user_signup_states[user_id]
+    state = user_signup_states.get(user_id, {})
     stage = state.get("stage", "")
     text = message.text.strip() if message.text else ""
 
@@ -545,6 +545,7 @@ async def signup_message_handler(message: Message) -> bool:
         state["name"] = text
         state["stage"] = "ask_photos"
         state["photos"] = []
+        state["last_photo_message_id"] = None
         await message.answer(
             "<b>Profile Photos</b>\n\nSend up to 6 photos. Click 'Done' when finished.",
             reply_markup=DONE_PHOTOS,
@@ -552,19 +553,31 @@ async def signup_message_handler(message: Message) -> bool:
         )
     elif stage == "ask_photos":
         if message.content_type != "photo":
-            await message.answer("Please send a photo or click 'Done'.", parse_mode="HTML")
+            await message.answer("Please send a photo or click 'Done'.", reply_markup=DONE_PHOTOS, parse_mode="HTML")
             return True
         if len(state.get("photos", [])) >= 6:
-            await message.answer("Photo limit reached (6). Click Done.", parse_mode="HTML")
+            await message.answer("Photo limit reached (6). Click Done.", reply_markup=DONE_PHOTOS, parse_mode="HTML")
             return True
         photo_url = await upload_tg_photo(message)
         if photo_url:
             if "photos" not in state:
                 state["photos"] = []
             state["photos"].append(photo_url)
-            await message.answer(f"Photo uploaded ({len(state['photos'])}/6).", parse_mode="HTML")
+            # Delete the previous photo message to keep the chat clean
+            if state.get("last_photo_message_id"):
+                try:
+                    await message.bot.delete_message(chat_id=user_id, message_id=state["last_photo_message_id"])
+                except Exception as e:
+                    logger.warning(f"Failed to delete previous photo message: {e}")
+            # Send a new message with the updated count and Done button
+            new_message = await message.answer(
+                f"<b>Profile Photos</b>\n\nPhoto uploaded ({len(state['photos'])}/6). Send another or click 'Done'.",
+                reply_markup=DONE_PHOTOS,
+                parse_mode="HTML"
+            )
+            state["last_photo_message_id"] = new_message.message_id
         else:
-            await message.answer("Upload Failed. Please try again.", parse_mode="HTML")
+            await message.answer("Upload Failed. Please try again.", reply_markup=DONE_PHOTOS, parse_mode="HTML")
     elif stage == "signin_email":
         state["signin_email"] = text
         state["stage"] = "signin_password"
