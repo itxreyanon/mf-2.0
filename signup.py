@@ -7,19 +7,9 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dateutil import parser
-import logging
-# --- IMPORT THE NEW DEVICE INFO MODULE ---
 from device_info import get_or_create_device_info_for_email, get_api_payload_with_device_info
-
-from db import (
-    set_token,
-    set_info_card,
-    set_signup_config,
-    get_signup_config,
-    set_user_filters
-)
-
-from filters import get_nationality_keyboard  # Reuse from filters.py, but adapt callbacks
+from db import set_token, set_info_card, set_signup_config, get_signup_config, set_user_filters
+from filters import get_nationality_keyboard
 
 # Logging configuration
 logger = logging.getLogger(__name__)
@@ -77,7 +67,6 @@ DONE_PHOTOS = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
 
-# Nationality filter keyboard (adapted from filters.py)
 FILTER_NATIONALITY_KB = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="All Countries", callback_data="signup_filter_nationality_all")],
     [
@@ -319,7 +308,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         )
     elif data.startswith("signup_filter_nationality_"):
         code = data.split("_")[-1] if len(data.split("_")) > 3 else ""
-        state["filter_nationality"] = code
+        state["filter_nationality"] = code if code != "all" else ""
         await show_signup_preview(callback.message, user_id, state)
     elif data == "create_accounts_confirm":
         await callback.message.edit_text("<b>Creating Accounts</b>...", parse_mode="HTML")
@@ -352,9 +341,9 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 })
         state["created_accounts"] = created_accounts
         state["verified_accounts"] = []
-        state["pending_accounts"] = created_accounts.copy()  # Initially all pending
+        state["pending_accounts"] = created_accounts.copy()
         result_text = (
-            f"<b>Account Creation Results</b>\n\n<b>Created:</b> {len(created_accounts)} accounts\n\n"
+            f"<b>Account Creation Results</b>\n\n<b>Created:</b> {len(created_accounts)} account{'s' if len(created_accounts) != 1 else ''}\n\n"
         )
         if created_accounts:
             result_text += "<b>Created Accounts:</b>\n" + '\n'.join([
@@ -366,84 +355,46 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             reply_markup=VERIFY_ALL_BUTTON,
             parse_mode="HTML"
         )
-    elif data == "verify_accounts":
-        created_accounts = state.get("created_accounts", [])
-        if not created_accounts:
+    elif data == "verify_accounts" or data == "retry_pending":
+        pending = state.get("pending_accounts", [])
+        if not pending:
             await callback.answer("No accounts to verify.", show_alert=True)
             return True
         await callback.message.edit_text("<b>Verifying Accounts</b>...", parse_mode="HTML")
-        verified, pending = [], []
-        filter_nat = state.get("filter_nationality", "")
-        for acc in created_accounts:
-            res = await try_signin(acc["email"], acc["password"], user_id)
-            if res.get("accessToken"):
-                token = res["accessToken"]
-                await set_token(user_id, token, acc["name"], acc["email"])
-                # Set filter for this account
-                await set_user_filters(user_id, token, {"filterNationalityCode": filter_nat})
-                if res.get("user"):
-                    res["user"].update({
-                        "email": acc["email"],
-                        "password": acc["password"],
-                        "token": token
-                    })
-                    await set_info_card(user_id, token, format_user_with_nationality(res["user"]), acc["email"])
-                verified.append(acc)
-            else:
-                pending.append(acc)
-        state["verified_accounts"] = verified
-        state["pending_accounts"] = pending
-        result_text = (
-            f"<b>Verification Results</b>\n\n"
-            f"<b>Verified & Saved:</b> {len(verified)}\n"
-            f"<b>Pending Verification:</b> {len(pending)}\n\n"
-        )
-        if verified:
-            result_text += "<b>Verified Accounts:</b>\n" + '\n'.join([f"• {a['name']}" for a in verified])
-        if pending:
-            result_text += "\n<b>Pending:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in pending])
-        reply_markup = RETRY_VERIFY_BUTTON if pending else SIGNUP_MENU
-        await callback.message.edit_text(
-            result_text,
-            reply_markup=reply_markup,
-            parse_mode="HTML"
-        )
-    elif data == "retry_pending":
-        pending = state.get("pending_accounts", [])
-        if not pending:
-            await callback.answer("No pending accounts.", show_alert=True)
-            return True
-        await callback.message.edit_text("<b>Retrying Verification</b>...", parse_mode="HTML")
         verified = state.get("verified_accounts", [])
         new_pending = []
         filter_nat = state.get("filter_nationality", "")
+        errors = []
         for acc in pending:
             res = await try_signin(acc["email"], acc["password"], user_id)
-            if res.get("accessToken"):
+            if res.get("accessToken") and res.get("user"):
                 token = res["accessToken"]
                 await set_token(user_id, token, acc["name"], acc["email"])
                 await set_user_filters(user_id, token, {"filterNationalityCode": filter_nat})
-                if res.get("user"):
-                    res["user"].update({
-                        "email": acc["email"],
-                        "password": acc["password"],
-                        "token": token
-                    })
-                    await set_info_card(user_id, token, format_user_with_nationality(res["user"]), acc["email"])
+                res["user"].update({
+                    "email": acc["email"],
+                    "password": acc["password"],
+                    "token": token
+                })
+                await set_info_card(user_id, token, format_user_with_nationality(res["user"]), acc["email"])
                 verified.append(acc)
             else:
                 new_pending.append(acc)
+                error_msg = res.get("errorMessage", "Verification failed, likely pending email confirmation.")
+                errors.append(f"• <code>{acc['email']}</code>: {error_msg}")
         state["verified_accounts"] = verified
         state["pending_accounts"] = new_pending
         result_text = (
-            f"<b>Retry Results</b>\n\n"
-            f"<b>Total Verified & Saved:</b> {len(verified)}\n"
-            f"<b>Still Pending:</b> {len(new_pending)}\n\n"
+            f"<b>Verification Results</b>\n\n"
+            f"<b>Verified & Saved:</b> {len(verified)}\n"
+            f"<b>Pending Verification:</b> {len(new_pending)}\n\n"
         )
         if verified:
-            result_text += "<b>All Verified:</b>\n" + '\n'.join([f"• {a['name']}" for a in verified])
+            result_text += "<b>Verified Accounts:</b>\n" + '\n'.join([f"• {a['name']} - <code>{a['email']}</code>" for a in verified])
         if new_pending:
-            result_text += "\n<b>Still Pending:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in new_pending])
+            result_text += "\n<b>Pending Verification:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in new_pending])
+        if errors:
+            result_text += "\n<b>Errors:</b>\n" + '\n'.join(errors)
         reply_markup = RETRY_VERIFY_BUTTON if new_pending else SIGNUP_MENU
         await callback.message.edit_text(
             result_text,
@@ -575,12 +526,13 @@ async def signup_message_handler(message: Message) -> bool:
     elif stage == "signin_password":
         msg = await message.answer("<b>Signing In</b>...", parse_mode="HTML")
         res = await try_signin(state["signin_email"], text, user_id)
-        if res.get("accessToken"):
+        if res.get("accessToken") and res.get("user"):
             creds = {"email": state["signin_email"], "password": text}
             await store_token_and_show_card(msg, res, creds)
         else:
+            error_msg = res.get("errorMessage", "Unknown error.")
             await msg.edit_text(
-                f"<b>Sign In Failed</b>\n\nError: {res.get('errorMessage', 'Unknown error.')}",
+                f"<b>Sign In Failed</b>\n\nError: {error_msg}",
                 reply_markup=SIGNUP_MENU,
                 parse_mode="HTML"
             )
@@ -647,31 +599,29 @@ async def meeff_upload_image(img_bytes: bytes) -> Optional[str]:
 async def try_signup(state: Dict, telegram_user_id: int) -> Dict:
     """Attempt to sign up a new user, using device info from the DB."""
     url = "https://api.meeff.com/user/register/email/v4"
-    
-    # Get or create device info for this specific email
     device_info = await get_or_create_device_info_for_email(telegram_user_id, state["email"])
-    
-    # --- ADDED FOR DEBUGGING ---
-    unique_id = device_info.get("device_unique_id")
-    logging.warning(f"SIGN UP using Device ID: {unique_id} for email {state['email']}")
-    # ---------------------------
-    
-    # Define the base payload without device-specific keys
+    logger.warning(f"SIGN UP using Device ID: {device_info.get('device_unique_id')} for email {state['email']}")
     base_payload = {
-        "providerId": state["email"], "providerToken": state["password"], "name": state["name"],
-        "gender": state["gender"], "birthYear": state.get("birth_year", 2004),
-        "nationalityCode": state.get("nationality", "US"), "description": state["desc"],
-        "photos": "|".join(state.get("photos", [])) or DEFAULT_PHOTOS, "locale": "en",
-        "color": "777777", "birthMonth": 3, "birthDay": 1, "languages": "en,es,fr",
-        "levels": "5,1,1", "purpose": "PB000000,PB000001", "purposeEtcDetail": "",
+        "providerId": state["email"],
+        "providerToken": state["password"],
+        "name": state["name"],
+        "gender": state["gender"],
+        "birthYear": state.get("birth_year", 2004),
+        "nationalityCode": state.get("nationality", "US"),
+        "description": state["desc"],
+        "photos": "|".join(state.get("photos", [])) or DEFAULT_PHOTOS,
+        "locale": "en",
+        "color": "777777",
+        "birthMonth": 3,
+        "birthDay": 1,
+        "languages": "en,es,fr",
+        "levels": "5,1,1",
+        "purpose": "PB000000,PB000001",
+        "purposeEtcDetail": "",
         "interest": "IS000001,IS000002,IS000003,IS000004",
     }
-    
-    # Use the helper to merge the device info into the payload
     payload = get_api_payload_with_device_info(base_payload, device_info)
-    
     headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'Content-Type': "application/json; charset=utf-8"}
-    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers) as response:
@@ -683,31 +633,21 @@ async def try_signup(state: Dict, telegram_user_id: int) -> Dict:
 async def try_signin(email: str, password: str, telegram_user_id: int) -> Dict:
     """Attempt to sign in, using device info from the DB."""
     url = "https://api.meeff.com/user/login/v4"
-    
-    # Get or create device info for this specific email
     device_info = await get_or_create_device_info_for_email(telegram_user_id, email)
-    
-    # --- ADDED FOR DEBUGGING ---
-    unique_id = device_info.get("device_unique_id")
-    logging.warning(f"SIGN IN using Device ID: {unique_id} for email {email}")
-    # ---------------------------
-
-    # Define the base payload
+    logger.warning(f"SIGN IN using Device ID: {device_info.get('device_unique_id')} for email {email}")
     base_payload = {"provider": "email", "providerId": email, "providerToken": password, "locale": "en"}
-    
-    # Use the helper to merge the device info into the payload
     payload = get_api_payload_with_device_info(base_payload, device_info)
-    
     headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'Content-Type': "application/json; charset=utf-8"}
-    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers) as response:
-                return await response.json()
+                resp_json = await response.json()
+                if response.status != 200:
+                    logger.error(f"Signin failed for {email}: Status {response.status}, Error: {resp_json.get('errorMessage', 'Unknown')}")
+                return resp_json
     except Exception as e:
-        logger.error(f"Error during signin: {e}")
+        logger.error(f"Error during signin for {email}: {e}")
         return {"errorMessage": "Failed to sign in."}
-
 
 async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds: Dict) -> None:
     """Store the access token and display the user card."""
@@ -729,7 +669,8 @@ async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds:
             disable_web_page_preview=True
         )
     else:
+        error_msg = login_result.get("errorMessage", "Token or user data not received.")
         await msg_obj.edit_text(
-            "<b>Error</b>\n\nToken not received, failed to save account.",
+            f"<b>Error</b>\n\nFailed to save account: {error_msg}",
             parse_mode="HTML"
         )
