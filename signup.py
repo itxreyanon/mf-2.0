@@ -67,15 +67,10 @@ DONE_PHOTOS = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
 
-EMAIL_SOURCE_KB = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Use Generated Emails", callback_data="use_generated_emails")],
-    [InlineKeyboardButton(text="Enter Custom Emails", callback_data="use_custom_emails")],
-    [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
-])
-
-CONFIRM_EMAILS_KB = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Confirm Emails", callback_data="confirm_emails")],
-    [InlineKeyboardButton(text="Change Emails", callback_data="change_emails")],
+CONFIG_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Change Email", callback_data="change_email")],
+    [InlineKeyboardButton(text="Auto Signup: Turn OFF", callback_data="toggle_auto_signup")],
+    [InlineKeyboardButton(text="Setup Signup Details", callback_data="setup_signup_config")],
     [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
 ])
 
@@ -243,7 +238,7 @@ async def show_signup_preview(message: Message, user_id: int, state: Dict) -> No
     available_emails = await select_available_emails(config.get("email", ""), num_accounts, pending_emails)
     state["selected_emails"] = available_emails  # Store selected emails for creation
     filter_nat = state.get('filter_nationality', 'All Countries')
-    email_list = '\n'.join([f"{i+1}. {email}" for i, email in enumerate(available_emails)]) if available_emails else "No available emails found!"
+    email_list = '\n'.join([f"{i+1}. {email}{' (Pending)' if email in pending_emails else ''}" for i, email in enumerate(available_emails)]) if available_emails else "No available emails found!"
     preview_text = (
         f"<b>Signup Preview</b>\n\n"
         f"<b>Name:</b> {state.get('name', 'N/A')}\n"
@@ -258,8 +253,7 @@ async def show_signup_preview(message: Message, user_id: int, state: Dict) -> No
     )
     confirm_text = f"Create {len(available_emails)} Account{'s' if len(available_emails) != 1 else ''}"
     menu = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=confirm_text, callback_data="confirm_emails")],
-        [InlineKeyboardButton(text="Change Emails", callback_data="change_emails")],
+        [InlineKeyboardButton(text=confirm_text, callback_data="create_accounts_confirm")],
         [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
     ])
     await message.edit_text(preview_text, reply_markup=menu, parse_mode="HTML")
@@ -281,6 +275,7 @@ async def signup_settings_command(message: Message, is_callback: bool = False) -
         "Turn <b>Auto Signup ON</b> to use these settings automatically."
     )
     menu = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Change Email", callback_data="change_email")],
         [InlineKeyboardButton(text=f"Auto Signup: {'Turn OFF' if auto_signup_status else 'Turn ON'}", callback_data="toggle_auto_signup")],
         [InlineKeyboardButton(text="Setup Signup Details", callback_data="setup_signup_config")],
         [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
@@ -310,6 +305,14 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
 
     if data == "signup_settings":
         await signup_settings_command(callback.message, is_callback=True)
+    elif data == "change_email":
+        state["stage"] = "config_email"
+        user_signup_states[user_id] = state
+        await callback.message.edit_text(
+            "<b>Change Email</b>\n\nEnter your new base Gmail address (e.g., yourname@gmail.com).",
+            reply_markup=BACK_TO_CONFIG,
+            parse_mode="HTML"
+        )
     elif data == "toggle_auto_signup":
         config = await get_signup_config(user_id) or {}
         config['auto_signup'] = not config.get('auto_signup', False)
@@ -341,46 +344,24 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 parse_mode="HTML"
             )
     elif data == "signup_photos_done":
-        state["stage"] = "ask_email_source"
-        await callback.message.edit_text(
-            "<b>Select Email Source</b>\n\nChoose how to provide emails for account creation:",
-            reply_markup=EMAIL_SOURCE_KB,
-            parse_mode="HTML"
-        )
-    elif data == "use_generated_emails":
         state["stage"] = "ask_filter_nationality"
         await callback.message.edit_text(
             "<b>Select Filter Nationality</b>\n\nChoose the nationality filter for requests:",
             reply_markup=FILTER_NATIONALITY_KB,
             parse_mode="HTML"
         )
-    elif data == "use_custom_emails":
-        state["stage"] = "ask_custom_emails"
-        state["custom_emails"] = []
-        await callback.message.edit_text(
-            "<b>Enter Custom Emails</b>\n\nSend each email address one by one (up to the number of accounts requested). Send 'Done' when finished.",
-            reply_markup=BACK_TO_SIGNUP,
-            parse_mode="HTML"
-        )
-    elif data == "change_emails":
-        state["stage"] = "ask_email_source"
-        await callback.message.edit_text(
-            "<b>Select Email Source</b>\n\nChoose how to provide emails for account creation:",
-            reply_markup=EMAIL_SOURCE_KB,
-            parse_mode="HTML"
-        )
     elif data.startswith("signup_filter_nationality_"):
         code = data.split("_")[-1] if len(data.split("_")) > 3 else ""
         state["filter_nationality"] = code if code != "all" else ""
         await show_signup_preview(callback.message, user_id, state)
-    elif data == "confirm_emails":
+    elif data == "create_accounts_confirm":
         await callback.message.edit_text("<b>Creating Accounts</b>...", parse_mode="HTML")
         config = await get_signup_config(user_id) or {}
         num_accounts = state.get("num_accounts", 1)
-        selected_emails = state.get("selected_emails", []) or state.get("custom_emails", [])
+        selected_emails = state.get("selected_emails", [])
         if not selected_emails:
             await callback.message.edit_text(
-                "<b>No Available Emails</b>\n\nNo valid email addresses provided. Please try a different base email or custom emails.",
+                "<b>No Available Emails</b>\n\nNo valid email variations found. Please try a different base email in Signup Config.",
                 reply_markup=SIGNUP_MENU,
                 parse_mode="HTML"
             )
@@ -584,32 +565,6 @@ async def signup_message_handler(message: Message) -> bool:
             await message.answer(f"Photo uploaded ({len(state['photos'])}/6).", parse_mode="HTML")
         else:
             await message.answer("Upload Failed. Please try again.", parse_mode="HTML")
-    elif stage == "ask_custom_emails":
-        if text.lower() == "done":
-            if not state.get("custom_emails", []):
-                await message.answer("No emails provided. Please enter at least one email or go back.", parse_mode="HTML")
-                return True
-            state["stage"] = "ask_filter_nationality"
-            await message.answer(
-                "<b>Select Filter Nationality</b>\n\nChoose the nationality filter for requests:",
-                reply_markup=FILTER_NATIONALITY_KB,
-                parse_mode="HTML"
-            )
-        else:
-            if '@' not in text:
-                await message.answer("Invalid email. Please try again:", parse_mode="HTML")
-                return True
-            is_available, error_msg = await check_email_exists(text)
-            if not is_available:
-                await message.answer(f"Email not available: {error_msg}\nPlease try another email:", parse_mode="HTML")
-                return True
-            if len(state.get("custom_emails", [])) >= state.get("num_accounts", 1):
-                await message.answer("Enough emails provided. Please send 'Done'.", parse_mode="HTML")
-                return True
-            if "custom_emails" not in state:
-                state["custom_emails"] = []
-            state["custom_emails"].append(text)
-            await message.answer(f"Email added ({len(state['custom_emails'])}/{state.get('num_accounts', 1)}). Send another or 'Done':", parse_mode="HTML")
     elif stage == "signin_email":
         state["signin_email"] = text
         state["stage"] = "signin_password"
