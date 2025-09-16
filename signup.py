@@ -213,10 +213,19 @@ async def show_signup_preview(message: Message, user_id: int, state: Dict) -> No
             parse_mode="HTML"
         )
         return
+    
     num_accounts = state.get('num_accounts', 1)
     available_emails = await select_available_emails(config.get("email", ""), num_accounts)
     state["selected_emails"] = available_emails  # Store selected emails for creation
     filter_nat = state.get('filter_nationality', 'All Countries')
+
+    # --- START FIX ---
+    # Pre-format the email list string to avoid the f-string syntax error
+    if not available_emails:
+        emails_list_str = 'No available emails found!'
+    else:
+        emails_list_str = '\n'.join([f'{i+1}. {email}' for i, email in enumerate(available_emails)])
+
     preview_text = (
         f"<b>Signup Preview</b>\n\n"
         f"<b>Name:</b> {state.get('name', 'N/A')}\n"
@@ -226,10 +235,11 @@ async def show_signup_preview(message: Message, user_id: int, state: Dict) -> No
         f"<b>Birth Year:</b> {config.get('birth_year', 'N/A')}\n"
         f"<b>Nationality:</b> {config.get('nationality', 'N/A')}\n"
         f"<b>Filter Nationality:</b> {filter_nat}\n\n"
-        f"<b>Emails to be Used:</b>\n" +
-        (f"\n{'No available emails found!' if not available_emails else '\n'.join([f'{i+1}. {email}' for i, email in enumerate(available_emails)])}") +
-        f"\n\n<b>Ready to create {len(available_emails)} of {num_accounts} requested account{'s' if num_accounts > 1 else ''}?</b>"
+        f"<b>Emails to be Used:</b>\n"
+        f"\n{emails_list_str}\n\n"  
+        f"<b>Ready to create {len(available_emails)} of {num_accounts} requested account{'s' if num_accounts > 1 else ''}?</b>"
     )
+
     confirm_text = f"Create {len(available_emails)} Account{'s' if len(available_emails) != 1 else ''}"
     menu = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=confirm_text, callback_data="create_accounts_confirm")],
