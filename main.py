@@ -224,7 +224,7 @@ async def invoke_command(message: Message):
 
     if disabled_accounts:
         for token_obj in disabled_accounts: await delete_token(user_id, token_obj["token"])
-        removed_names = "\n".join([f"• {html.escape(acc['name'])}" for acc in disabled_accounts])
+        removed_names = "\n".join([f"â€¢ {html.escape(acc['name'])}" for acc in disabled_accounts])
         await status_msg.edit_text(f"<b>Cleanup Complete</b>\nWorking: {len(working_accounts)}\nRemoved: {len(disabled_accounts)}\n\n<b>Removed accounts:</b>\n{removed_names}", parse_mode="HTML")
     else:
         await status_msg.edit_text(f"<b>All Accounts Working ({len(working_accounts)} total).</b>", parse_mode="HTML")
@@ -303,7 +303,7 @@ async def handle_new_token(message: Message):
                 return await verification_msg.edit_text("<b>Verification Error</b>.", parse_mode="HTML")
 
         account_name = token_data[1] if len(token_data) > 1 else f"Account {len(await get_tokens(user_id)) + 1}"
-        await set_token(user_id, token, account_name) # Uses the full signature from db.py
+        await set_token(user_id, token, account_name) # Fixed: Only pass 3 arguments, not 4
         await verification_msg.edit_text(f"<b>Token Verified</b> and saved as '<code>{html.escape(account_name)}</code>'.", parse_mode="HTML")
 
 async def show_manage_accounts_menu(callback_query: CallbackQuery):
