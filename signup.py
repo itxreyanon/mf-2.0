@@ -3,10 +3,12 @@ import json
 import random
 import itertools
 import logging
+import asyncio
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dateutil import parser
+from aiogram.exceptions import TelegramBadRequest
 from device_info import get_or_create_device_info_for_email, get_api_payload_with_device_info
 from db import set_token, set_info_card, set_signup_config, get_signup_config, set_user_filters
 from filters import get_nationality_keyboard
@@ -174,6 +176,22 @@ def generate_email_variations(base_email: str, count: int = 50) -> List[str]:
             variations.add(''.join(new_username) + '@' + domain)
     return list(variations)
 
+async def count_available_emails(base_email: str, pending_emails: List[str], max_check: int = 50) -> int:
+    """Count available email variations for the base email."""
+    variations = generate_email_variations(base_email, max_check)
+    available_count = 0
+    for email in variations:
+        if email in pending_emails:
+            is_available, _ = await check_email_exists(email)
+            if is_available:
+                available_count += 1
+        elif len(pending_emails) + available_count < max_check:
+            is_available, _ = await check_email_exists(email)
+            if is_available:
+                available_count += 1
+        await asyncio.sleep(0.1)  # Small delay to avoid overwhelming API
+    return available_count
+
 def get_random_bio() -> str:
     """Return a random bio from the default bios list."""
     return random.choice(DEFAULT_BIOS)
@@ -208,6 +226,7 @@ async def select_available_emails(base_email: str, num_accounts: int, pending_em
         is_available, _ = await check_email_exists(email)
         if is_available:
             available_emails.append(email)
+        await asyncio.sleep(0.1)  # Small delay to avoid overwhelming API
     
     # If more emails are needed, generate new variations
     if len(available_emails) < num_accounts:
@@ -220,6 +239,7 @@ async def select_available_emails(base_email: str, num_accounts: int, pending_em
             is_available, _ = await check_email_exists(email)
             if is_available:
                 available_emails.append(email)
+            await asyncio.sleep(0.1)  # Small delay to avoid overwhelming API
     
     return available_emails
 
@@ -256,7 +276,11 @@ async def show_signup_preview(message: Message, user_id: int, state: Dict) -> No
         [InlineKeyboardButton(text=confirm_text, callback_data="create_accounts_confirm")],
         [InlineKeyboardButton(text="Back", callback_data="signup_menu")]
     ])
-    await message.edit_text(preview_text, reply_markup=menu, parse_mode="HTML")
+    try:
+        await message.edit_text(preview_text, reply_markup=menu, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        logger.warning(f"TelegramBadRequest in show_signup_preview: {e}")
+        await message.answer(preview_text, reply_markup=menu, parse_mode="HTML")
     user_signup_states[user_id] = state
 
 async def signup_settings_command(message: Message, is_callback: bool = False) -> None:
@@ -264,9 +288,13 @@ async def signup_settings_command(message: Message, is_callback: bool = False) -
     user_id = message.chat.id
     config = await get_signup_config(user_id) or {}
     auto_signup_status = config.get('auto_signup', False)
+    base_email = config.get('email', '')
+    pending_emails = [acc['email'] for acc in user_signup_states.get(user_id, {}).get('pending_accounts', [])]
+    available_email_count = await count_available_emails(base_email, pending_emails, max_check=50) if base_email else 0
     config_text = (
         "<b>Signup Configuration</b>\n\nSet default values and enable Auto Signup.\n\n"
-        f"<b>Email:</b> <code>{config.get('email', 'Not set')}</code>\n"
+        f"<b>Email:</b> <code>{base_email or 'Not set'}</code>\n"
+        f"<b>Available Email Variations:</b> {available_email_count}\n"
         f"<b>Password:</b> <code>{'*' * len(config.get('password', '')) if config.get('password') else 'Not set'}</code>\n"
         f"<b>Gender:</b> {config.get('gender', 'Not set')}\n"
         f"<b>Birth Year:</b> {config.get('birth_year', 'Not set')}\n"
@@ -285,8 +313,9 @@ async def signup_settings_command(message: Message, is_callback: bool = False) -
             await message.edit_text(config_text, reply_markup=menu, parse_mode="HTML")
         else:
             await message.answer(config_text, reply_markup=menu, parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Error displaying signup settings: {e}")
+    except TelegramBadRequest as e:
+        logger.warning(f"TelegramBadRequest in signup_settings_command: {e}")
+        await message.answer(config_text, reply_markup=menu, parse_mode="HTML")
 
 async def signup_command(message: Message) -> None:
     """Handle the /signup command to initiate account creation."""
@@ -303,175 +332,262 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
     state = user_signup_states.get(user_id, {})
     data = callback.data
 
-    if data == "signup_settings":
-        await signup_settings_command(callback.message, is_callback=True)
-    elif data == "change_email":
-        state["stage"] = "config_email"
-        user_signup_states[user_id] = state
-        await callback.message.edit_text(
-            "<b>Change Email</b>\n\nEnter your new base Gmail address (e.g., yourname@gmail.com).",
-            reply_markup=BACK_TO_CONFIG,
-            parse_mode="HTML"
-        )
-    elif data == "toggle_auto_signup":
-        config = await get_signup_config(user_id) or {}
-        config['auto_signup'] = not config.get('auto_signup', False)
-        await set_signup_config(user_id, config)
-        await callback.answer(f"Auto Signup turned {'ON' if config['auto_signup'] else 'OFF'}")
-        await signup_settings_command(callback.message, is_callback=True)
-    elif data == "setup_signup_config":
-        state["stage"] = "config_email"
-        user_signup_states[user_id] = state
-        await callback.message.edit_text(
-            "<b>Setup Email</b>\n\nEnter your base Gmail address (e.g., yourname@gmail.com).",
-            reply_markup=BACK_TO_CONFIG,
-            parse_mode="HTML"
-        )
-    elif data == "signup_go":
-        config = await get_signup_config(user_id) or {}
-        if not all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
-            await callback.message.edit_text(
-                "<b>Configuration Incomplete</b>\n\nPlease set up all details in <b>Signup Config</b> first.",
-                reply_markup=SIGNUP_MENU,
-                parse_mode="HTML"
-            )
-        else:
-            state["stage"] = "ask_num_accounts"
+    try:
+        if data == "signup_settings":
+            await signup_settings_command(callback.message, is_callback=True)
+        elif data == "change_email":
+            state["stage"] = "change_email"
             user_signup_states[user_id] = state
             await callback.message.edit_text(
-                "<b>Account Creation</b>\n\nEnter the number of accounts to create (1-10):",
-                reply_markup=BACK_TO_SIGNUP,
+                "<b>Change Email</b>\n\nEnter your new base Gmail address (e.g., yourname@gmail.com).",
+                reply_markup=BACK_TO_CONFIG,
                 parse_mode="HTML"
             )
-    elif data == "signup_photos_done":
-        state["stage"] = "ask_filter_nationality"
-        await callback.message.edit_text(
-            "<b>Select Filter Nationality</b>\n\nChoose the nationality filter for requests:",
-            reply_markup=FILTER_NATIONALITY_KB,
-            parse_mode="HTML"
-        )
-    elif data.startswith("signup_filter_nationality_"):
-        code = data.split("_")[-1] if len(data.split("_")) > 3 else ""
-        state["filter_nationality"] = code if code != "all" else ""
-        await show_signup_preview(callback.message, user_id, state)
-    elif data == "create_accounts_confirm":
-        await callback.message.edit_text("<b>Creating Accounts</b>...", parse_mode="HTML")
-        config = await get_signup_config(user_id) or {}
-        num_accounts = state.get("num_accounts", 1)
-        selected_emails = state.get("selected_emails", [])
-        if not selected_emails:
+        elif data == "toggle_auto_signup":
+            config = await get_signup_config(user_id) or {}
+            config['auto_signup'] = not config.get('auto_signup', False)
+            await set_signup_config(user_id, config)
+            await callback.answer(f"Auto Signup turned {'ON' if config['auto_signup'] else 'OFF'}")
+            await signup_settings_command(callback.message, is_callback=True)
+        elif data == "setup_signup_config":
+            state["stage"] = "config_email"
+            user_signup_states[user_id] = state
             await callback.message.edit_text(
-                "<b>No Available Emails</b>\n\nNo valid email variations found. Please try a different base email in Signup Config.",
-                reply_markup=SIGNUP_MENU,
+                "<b>Setup Email</b>\n\nEnter your base Gmail address (e.g., yourname@gmail.com).",
+                reply_markup=BACK_TO_CONFIG,
                 parse_mode="HTML"
             )
-            return True
-        created_accounts = []
-        for email in selected_emails[:num_accounts]:
-            acc_state = {
-                "email": email,
-                "password": config.get("password"),
-                "name": state.get('name', 'User'),
-                "gender": config.get("gender"),
-                "desc": get_random_bio(),
-                "photos": state.get("photos", []),
-                "birth_year": config.get("birth_year", 2000),
-                "nationality": config.get("nationality", "US")
-            }
-            res = await try_signup(acc_state, user_id)
-            if res.get("user", {}).get("_id"):
-                created_accounts.append({
-                    "email": email,
-                    "name": acc_state["name"],
-                    "password": config.get("password")
-                })
-        state["created_accounts"] = created_accounts
-        state["verified_accounts"] = []
-        state["pending_accounts"] = created_accounts.copy()
-        result_text = (
-            f"<b>Account Creation Results</b>\n\n<b>Created:</b> {len(created_accounts)} account{'s' if len(created_accounts) != 1 else ''}\n\n"
-        )
-        if created_accounts:
-            result_text += "<b>Created Accounts:</b>\n" + '\n'.join([
-                f"• {a['name']} - <code>{a['email']}</code>" for a in created_accounts
-            ])
-        result_text += "\n\nPlease verify all emails, then click the button below."
-        await callback.message.edit_text(
-            result_text,
-            reply_markup=VERIFY_ALL_BUTTON,
-            parse_mode="HTML"
-        )
-    elif data == "verify_accounts" or data == "retry_pending":
-        pending = state.get("pending_accounts", [])
-        if not pending:
-            await callback.message.edit_text(
-                "<b>No Pending Accounts</b>\n\nAll accounts are either verified or none were created.",
-                reply_markup=SIGNUP_MENU,
-                parse_mode="HTML"
-            )
-            return True
-        await callback.message.edit_text("<b>Verifying Accounts</b>...", parse_mode="HTML")
-        verified = state.get("verified_accounts", [])
-        new_pending = []
-        filter_nat = state.get("filter_nationality", "")
-        for acc in pending:
-            res = await try_signin(acc["email"], acc["password"], user_id)
-            if res.get("accessToken") and res.get("user"):
-                token = res["accessToken"]
-                await set_token(user_id, token, acc["name"], acc["email"])
-                await set_user_filters(user_id, token, {"filterNationalityCode": filter_nat})
-                res["user"].update({
-                    "email": acc["email"],
-                    "password": acc["password"],
-                    "token": token
-                })
-                await set_info_card(user_id, token, format_user_with_nationality(res["user"]), acc["email"])
-                verified.append(acc)
+        elif data == "signup_go":
+            config = await get_signup_config(user_id) or {}
+            if not all(k in config for k in ['email', 'password', 'gender', 'birth_year', 'nationality']):
+                await callback.message.edit_text(
+                    "<b>Configuration Incomplete</b>\n\nPlease set up all details in <b>Signup Config</b> first.",
+                    reply_markup=SIGNUP_MENU,
+                    parse_mode="HTML"
+                )
             else:
-                new_pending.append(acc)
-        state["verified_accounts"] = verified
-        state["pending_accounts"] = new_pending
-        if not new_pending:
-            result_text = (
-                f"<b>Verification Results</b>\n\n"
-                f"<b>All Accounts Verified:</b> {len(verified)} account{'s' if len(verified) != 1 else ''}\n\n"
-                "All accounts have been successfully verified and saved."
+                state["stage"] = "ask_num_accounts"
+                user_signup_states[user_id] = state
+                await callback.message.edit_text(
+                    "<b>Account Creation</b>\n\nEnter the number of accounts to create (1-10):",
+                    reply_markup=BACK_TO_SIGNUP,
+                    parse_mode="HTML"
+                )
+        elif data == "signup_photos_done":
+            state["stage"] = "ask_filter_nationality"
+            await callback.message.edit_text(
+                "<b>Select Filter Nationality</b>\n\nChoose the nationality filter for requests:",
+                reply_markup=FILTER_NATIONALITY_KB,
+                parse_mode="HTML"
             )
-            reply_markup = SIGNUP_MENU
+        elif data.startswith("signup_filter_nationality_"):
+            code = data.split("_")[-1] if len(data.split("_")) > 3 else ""
+            state["filter_nationality"] = code if code != "all" else ""
+            await show_signup_preview(callback.message, user_id, state)
+        elif data == "create_accounts_confirm":
+            config = await get_signup_config(user_id) or {}
+            num_accounts = state.get("num_accounts", 1)
+            selected_emails = state.get("selected_emails", [])
+            if not selected_emails:
+                await callback.message.edit_text(
+                    "<b>No Available Emails</b>\n\nNo valid email variations found. Please try a different base email in Signup Config.",
+                    reply_markup=SIGNUP_MENU,
+                    parse_mode="HTML"
+                )
+                return True
+            await callback.message.edit_text("<b>Creating Accounts...</b>\n\nProgress: 0%", parse_mode="HTML")
+            created_accounts = []
+            for i, email in enumerate(selected_emails[:num_accounts]):
+                acc_state = {
+                    "email": email,
+                    "password": config.get("password"),
+                    "name": state.get('name', 'User'),
+                    "gender": config.get("gender"),
+                    "desc": get_random_bio(),
+                    "photos": state.get("photos", []),
+                    "birth_year": config.get("birth_year", 2000),
+                    "nationality": config.get("nationality", "US")
+                }
+                res = await try_signup(acc_state, user_id)
+                if res.get("user", {}).get("_id"):
+                    created_accounts.append({
+                        "email": email,
+                        "name": acc_state["name"],
+                        "password": config.get("password")
+                    })
+                await asyncio.sleep(1)  # Delay to avoid rate-limiting
+                progress = int((i + 1) / len(selected_emails[:num_accounts]) * 100)
+                try:
+                    await callback.message.edit_text(
+                        f"<b>Creating Accounts...</b>\n\nProgress: {progress}%",
+                        parse_mode="HTML"
+                    )
+                except TelegramBadRequest as e:
+                    logger.warning(f"TelegramBadRequest during progress update: {e}")
+                    await callback.message.answer(
+                        f"<b>Creating Accounts...</b>\n\nProgress: {progress}%",
+                        parse_mode="HTML"
+                    )
+            state["created_accounts"] = created_accounts
+            state["verified_accounts"] = []
+            state["pending_accounts"] = created_accounts.copy()
+            result_text = (
+                f"<b>Account Creation Results</b>\n\n"
+                f"<b>Created:</b> {len(created_accounts)} of {num_accounts} requested account{'s' if num_accounts != 1 else ''}\n\n"
+            )
+            if created_accounts:
+                result_text += "<b>Created Accounts:</b>\n" + '\n'.join([
+                    f"• {a['name']} - <code>{a['email']}</code>" for a in created_accounts
+                ])
+            result_text += "\n\nPlease verify all emails, then click the button below."
+            try:
+                await callback.message.edit_text(
+                    result_text,
+                    reply_markup=VERIFY_ALL_BUTTON,
+                    parse_mode="HTML"
+                )
+            except TelegramBadRequest as e:
+                logger.warning(f"TelegramBadRequest in create_accounts_confirm: {e}")
+                await callback.message.answer(
+                    result_text,
+                    reply_markup=VERIFY_ALL_BUTTON,
+                    parse_mode="HTML"
+                )
+        elif data == "verify_accounts" or data == "retry_pending":
+            pending = state.get("pending_accounts", [])
+            if not pending:
+                try:
+                    await callback.message.edit_text(
+                        "<b>No Pending Accounts</b>\n\nAll accounts are either verified or none were created.",
+                        reply_markup=SIGNUP_MENU,
+                        parse_mode="HTML"
+                    )
+                except TelegramBadRequest as e:
+                    logger.warning(f"TelegramBadRequest in verify_accounts: {e}")
+                    await callback.message.answer(
+                        "<b>No Pending Accounts</b>\n\nAll accounts are either verified or none were created.",
+                        reply_markup=SIGNUP_MENU,
+                        parse_mode="HTML"
+                    )
+                return True
+            await callback.message.edit_text("<b>Verifying Accounts...</b>\n\nProgress: 0%", parse_mode="HTML")
+            verified = []
+            new_pending = []
+            filter_nat = state.get("filter_nationality", "")
+            for i, acc in enumerate(pending):
+                res = await try_signin(acc["email"], acc["password"], user_id)
+                if res.get("accessToken") and res.get("user"):
+                    token = res["accessToken"]
+                    await set_token(user_id, token, acc["name"], acc["email"])
+                    await set_user_filters(user_id, token, {"filterNationalityCode": filter_nat})
+                    res["user"].update({
+                        "email": acc["email"],
+                        "password": acc["password"],
+                        "token": token
+                    })
+                    await set_info_card(user_id, token, format_user_with_nationality(res["user"]), acc["email"])
+                    verified.append(acc)
+                else:
+                    error_msg = res.get("errorMessage", "Unknown error")
+                    if "too frequent" in error_msg.lower():
+                        new_pending.append(acc)
+                        logger.warning(f"Rate-limited for {acc['email']}: {error_msg}")
+                    else:
+                        new_pending.append(acc)
+                await asyncio.sleep(2)  # Delay to avoid rate-limiting
+                progress = int((i + 1) / len(pending) * 100)
+                try:
+                    await callback.message.edit_text(
+                        f"<b>Verifying Accounts...</b>\n\nProgress: {progress}%",
+                        parse_mode="HTML"
+                    )
+                except TelegramBadRequest as e:
+                    logger.warning(f"TelegramBadRequest during verification progress: {e}")
+                    await callback.message.answer(
+                        f"<b>Verifying Accounts...</b>\n\nProgress: {progress}%",
+                        parse_mode="HTML"
+                    )
+            state["verified_accounts"] = verified
+            state["pending_accounts"] = new_pending
+            if not new_pending:
+                result_text = (
+                    f"<b>Verification Results</b>\n\n"
+                    f"<b>Verified:</b> {len(verified)} account{'s' if len(verified) != 1 else ''}\n\n"
+                    "All accounts have been successfully verified and saved."
+                )
+                reply_markup = SIGNUP_MENU
+            else:
+                result_text = (
+                    f"<b>Verification Results</b>\n\n"
+                    f"<b>Verified:</b> {len(verified)} account{'s' if len(verified) != 1 else ''}\n"
+                    f"<b>Pending Verification:</b> {len(new_pending)} account{'s' if len(new_pending) != 1 else ''}\n\n"
+                    "<b>Pending Accounts:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in new_pending]) +
+                    "\n\nPlease verify these emails, then retry."
+                )
+                if any("too frequent" in res.get("errorMessage", "").lower() for acc in new_pending):
+                    result_text += "\n\n<b>Note:</b> Some accounts could not be verified due to frequent login attempts. Please wait and retry."
+                reply_markup = RETRY_VERIFY_BUTTON
+            try:
+                await callback.message.edit_text(
+                    result_text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+            except TelegramBadRequest as e:
+                logger.warning(f"TelegramBadRequest in verification result: {e}")
+                await callback.message.answer(
+                    result_text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+        elif data == "signup_menu":
+            state["stage"] = "menu"
+            try:
+                await callback.message.edit_text(
+                    "<b>Account Creation</b>\n\nChoose an option:",
+                    reply_markup=SIGNUP_MENU,
+                    parse_mode="HTML"
+                )
+            except TelegramBadRequest as e:
+                logger.warning(f"TelegramBadRequest in signup_menu: {e}")
+                await callback.message.answer(
+                    "<b>Account Creation</b>\n\nChoose an option:",
+                    reply_markup=SIGNUP_MENU,
+                    parse_mode="HTML"
+                )
+        elif data == "signin_go":
+            state["stage"] = "signin_email"
+            try:
+                await callback.message.edit_text(
+                    "<b>Sign In</b>\n\nEnter your email address:",
+                    reply_markup=BACK_TO_SIGNUP,
+                    parse_mode="HTML"
+                )
+            except TelegramBadRequest as e:
+                logger.warning(f"TelegramBadRequest in signin_go: {e}")
+                await callback.message.answer(
+                    "<b>Sign In</b>\n\nEnter your email address:",
+                    reply_markup=BACK_TO_SIGNUP,
+                    parse_mode="HTML"
+                )
         else:
-            result_text = (
-                f"<b>Verification Results</b>\n\n"
-                f"<b>Pending Verification:</b> {len(new_pending)} account{'s' if len(new_pending) != 1 else ''}\n\n"
-                "<b>Pending Accounts:</b>\n" + '\n'.join([f"• <code>{a['email']}</code>" for a in new_pending]) +
-                "\n\nPlease verify these emails, then retry."
-            )
-            reply_markup = RETRY_VERIFY_BUTTON
-        await callback.message.edit_text(
-            result_text,
-            reply_markup=reply_markup,
-            parse_mode="HTML"
-        )
-    elif data == "signup_menu":
-        state["stage"] = "menu"
-        await callback.message.edit_text(
-            "<b>Account Creation</b>\n\nChoose an option:",
-            reply_markup=SIGNUP_MENU,
-            parse_mode="HTML"
-        )
-    elif data == "signin_go":
-        state["stage"] = "signin_email"
-        await callback.message.edit_text(
-            "<b>Sign In</b>\n\nEnter your email address:",
-            reply_markup=BACK_TO_SIGNUP,
-            parse_mode="HTML"
-        )
-    else:
+            await callback.answer()
+            return False
+        
+        user_signup_states[user_id] = state
         await callback.answer()
-        return False
-    
-    user_signup_states[user_id] = state
-    await callback.answer()
-    return True
+        return True
+    except TelegramBadRequest as e:
+        logger.error(f"TelegramBadRequest in signup_callback_handler: {e}")
+        try:
+            await callback.message.answer(
+                "<b>Error</b>\n\nAction took too long. Please try again.",
+                reply_markup=SIGNUP_MENU,
+                parse_mode="HTML"
+            )
+        except Exception as e2:
+            logger.error(f"Failed to send error message: {e2}")
+        return True
 
 async def signup_message_handler(message: Message) -> bool:
     """Handle messages during the signup process."""
@@ -482,7 +598,17 @@ async def signup_message_handler(message: Message) -> bool:
     stage = state.get("stage", "")
     text = message.text.strip() if message.text else ""
 
-    if stage.startswith("config_"):
+    if stage == "change_email":
+        if '@' not in text:
+            await message.answer("Invalid Email. Please try again:", reply_markup=BACK_TO_CONFIG, parse_mode="HTML")
+            return True
+        config = await get_signup_config(user_id) or {}
+        config["email"] = text
+        await set_signup_config(user_id, config)
+        state["stage"] = "menu"
+        await message.answer("<b>Email Updated!</b>", parse_mode="HTML")
+        await signup_settings_command(message)
+    elif stage.startswith("config_"):
         config = await get_signup_config(user_id) or {}
         if stage == "config_email":
             if '@' not in text:
@@ -589,151 +715,4 @@ async def signup_message_handler(message: Message) -> bool:
     elif stage == "signin_password":
         msg = await message.answer("<b>Signing In</b>...", parse_mode="HTML")
         res = await try_signin(state["signin_email"], text, user_id)
-        if res.get("accessToken") and res.get("user"):
-            creds = {"email": state["signin_email"], "password": text}
-            await store_token_and_show_card(msg, res, creds)
-        else:
-            error_msg = res.get("errorMessage", "Unknown error.")
-            await msg.edit_text(
-                f"<b>Sign In Failed</b>\n\nError: {error_msg}",
-                reply_markup=SIGNUP_MENU,
-                parse_mode="HTML"
-            )
-        state["stage"] = "menu"
-    else:
-        return False
-    
-    user_signup_states[user_id] = state
-    return True
-
-async def upload_tg_photo(message: Message) -> Optional[str]:
-    """Upload a Telegram photo to Meeff's server."""
-    try:
-        file = await message.bot.get_file(message.photo[-1].file_id)
-        file_url = f"https://api.telegram.org/file/bot{message.bot.token}/{file.file_path}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file_url) as resp:
-                if resp.status != 200:
-                    return None
-                return await meeff_upload_image(await resp.read())
-    except Exception as e:
-        logger.error(f"Error uploading Telegram photo: {e}")
-        return None
-
-async def meeff_upload_image(img_bytes: bytes) -> Optional[str]:
-    """Upload an image to Meeff's S3 storage."""
-    url = "https://api.meeff.com/api/upload/v1"
-    payload = {"category": "profile", "count": 1, "locale": "en"}
-    headers = {
-        'User-Agent': "okhttp/5.0.0-alpha.14",
-        'Accept-Encoding': "gzip",
-        'Content-Type': "application/json; charset=utf-8"
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=json.dumps(payload), headers=headers) as resp:
-                resp_json = await resp.json()
-                data = resp_json.get("data", {})
-                upload_info = data.get("uploadImageInfoList", [{}])[0]
-                upload_url = data.get("Host")
-                if not (upload_info and upload_url):
-                    return None
-                fields = {
-                    k: upload_info.get(k) or data.get(k)
-                    for k in ["X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "Policy", "X-Amz-Signature"]
-                }
-                fields.update({
-                    k: data.get(k)
-                    for k in ["acl", "Content-Type", "x-amz-meta-uuid"]
-                })
-                fields["key"] = upload_info.get("key")
-                if any(v is None for v in fields.values()):
-                    return None
-                form = aiohttp.FormData()
-                for k, v in fields.items():
-                    form.add_field(k, v)
-                form.add_field('file', img_bytes, filename='photo.jpg', content_type='image/jpeg')
-                async with session.post(upload_url, data=form) as s3resp:
-                    return upload_info.get("uploadImagePath") if s3resp.status in (200, 204) else None
-    except Exception as e:
-        logger.error(f"Error uploading image to Meeff: {e}")
-        return None
-
-async def try_signup(state: Dict, telegram_user_id: int) -> Dict:
-    """Attempt to sign up a new user, using device info from the DB."""
-    url = "https://api.meeff.com/user/register/email/v4"
-    device_info = await get_or_create_device_info_for_email(telegram_user_id, state["email"])
-    logger.warning(f"SIGN UP using Device ID: {device_info.get('device_unique_id')} for email {state['email']}")
-    base_payload = {
-        "providerId": state["email"],
-        "providerToken": state["password"],
-        "name": state["name"],
-        "gender": state["gender"],
-        "birthYear": state.get("birth_year", 2004),
-        "nationalityCode": state.get("nationality", "US"),
-        "description": state["desc"],
-        "photos": "|".join(state.get("photos", [])) or DEFAULT_PHOTOS,
-        "locale": "en",
-        "color": "777777",
-        "birthMonth": 3,
-        "birthDay": 1,
-        "languages": "en,es,fr",
-        "levels": "5,1,1",
-        "purpose": "PB000000,PB000001",
-        "purposeEtcDetail": "",
-        "interest": "IS000001,IS000002,IS000003,IS000004",
-    }
-    payload = get_api_payload_with_device_info(base_payload, device_info)
-    headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'Content-Type': "application/json; charset=utf-8"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as response:
-                return await response.json()
-    except Exception as e:
-        logger.error(f"Error during signup: {e}")
-        return {"errorMessage": "Failed to register account."}
-
-async def try_signin(email: str, password: str, telegram_user_id: int) -> Dict:
-    """Attempt to sign in, using device info from the DB."""
-    url = "https://api.meeff.com/user/login/v4"
-    device_info = await get_or_create_device_info_for_email(telegram_user_id, email)
-    logger.warning(f"SIGN IN using Device ID: {device_info.get('device_unique_id')} for email {email}")
-    base_payload = {"provider": "email", "providerId": email, "providerToken": password, "locale": "en"}
-    payload = get_api_payload_with_device_info(base_payload, device_info)
-    headers = {'User-Agent': "okhttp/5.0.0-alpha.14", 'Content-Type': "application/json; charset=utf-8"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as response:
-                resp_json = await response.json()
-                if response.status != 200:
-                    logger.error(f"Signin failed for {email}: Status {response.status}, Error: {resp_json.get('errorMessage', 'Unknown')}")
-                return resp_json
-    except Exception as e:
-        logger.error(f"Error during signin for {email}: {e}")
-        return {"errorMessage": "Failed to sign in."}
-
-async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds: Dict) -> None:
-    """Store the access token and display the user card."""
-    access_token = login_result.get("accessToken")
-    user_data = login_result.get("user")
-    if access_token and user_data:
-        user_id = msg_obj.chat.id
-        await set_token(user_id, access_token, user_data.get("name", creds.get("email")), creds.get("email"))
-        user_data.update({
-            "email": creds.get("email"),
-            "password": creds.get("password"),
-            "token": access_token
-        })
-        text = format_user_with_nationality(user_data)
-        await set_info_card(user_id, access_token, text, creds.get("email"))
-        await msg_obj.edit_text(
-            "<b>Account Signed In & Saved!</b>\n\n" + text,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-    else:
-        error_msg = login_result.get("errorMessage", "Token or user data not received.")
-        await msg_obj.edit_text(
-            f"<b>Error</b>\n\nFailed to save account: {error_msg}",
-            parse_mode="HTML"
-        )
+        if res.get("accessToken")
