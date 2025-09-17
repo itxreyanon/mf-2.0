@@ -10,7 +10,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, B
 from collections import defaultdict
 from aiogram.exceptions import TelegramBadRequest
 
-# Import custom modules from the new async db.py
+# Import custom modules
 from db import (
     set_token, get_tokens, set_current_account, get_current_account, delete_token,
     set_user_filters, get_user_filters, set_spam_filter, get_spam_filter,
@@ -20,12 +20,12 @@ from db import (
     list_all_collections, get_collection_summary, connect_to_collection,
     rename_user_collection, transfer_to_user, get_current_collection_info
 )
-# Make sure these other local modules are compatible if they also perform I/O
 from lounge import send_lounge, send_lounge_all_tokens
 from chatroom import send_message_to_everyone, send_message_to_everyone_all_tokens
 from unsubscribe import unsubscribe_everyone
 from filters import meeff_filter_command, set_account_filter, get_meeff_filter_main_keyboard, set_filter
 from allcountry import run_all_countries
+# Import signup handlers
 from signup import signup_command, signup_callback_handler, signup_message_handler, signup_settings_command
 from friend_requests import run_requests, process_all_tokens, user_states, stop_markup
 from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
@@ -41,10 +41,6 @@ db_operation_states: Dict[int, Dict[str, str]] = defaultdict(dict)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
-bot = Bot(token=API_TOKEN)
-router = Router()
-dp = Dispatcher()
 
 # --- Utility & Keyboards ---
 def is_admin(user_id: int) -> bool: return user_id in ADMIN_USER_IDS
@@ -81,9 +77,12 @@ start_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=
 send_request_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Start Request", callback_data="start"), InlineKeyboardButton(text="Request All", callback_data="start_all")], [InlineKeyboardButton(text="Back", callback_data="back_to_menu")]])
 back_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Back", callback_data="back_to_menu")]])
 
+# --- Bot Setup ---
+router = Router()
+
 # --- Command Handlers ---
 @router.message(Command("password"))
-async def password_command(message: Message):
+async def password_command(message: Message, bot: Bot):
     try:
         if message.text.split()[1] == TEMP_PASSWORD:
             password_access[message.chat.id] = datetime.now() + timedelta(hours=1)
@@ -125,7 +124,7 @@ async def skip_command(message: Message):
     await message.reply("<b>Unsubscribe Options</b>...", reply_markup=get_unsubscribe_menu(), parse_mode="HTML")
 
 @router.message(Command("send_lounge_all"))
-async def send_lounge_all(message: Message):
+async def send_lounge_all(message: Message, bot: Bot):
     user_id = message.chat.id
     if not has_valid_access(user_id): return await message.reply("You are not authorized.")
     parts = message.text.split(maxsplit=1)
@@ -137,11 +136,10 @@ async def send_lounge_all(message: Message):
 
     spam_enabled = await get_individual_spam_filter(user_id, "lounge")
     status = await message.reply(f"<b>Starting Lounge Messages</b> for {len(active_tokens_data)} accounts...", parse_mode="HTML")
-    # FIX: Added 'user_id' as the last argument
     await send_lounge_all_tokens(active_tokens_data, custom_message, status, bot, user_id, spam_enabled, user_id)
 
 @router.message(Command("lounge"))
-async def lounge_command(message: Message):
+async def lounge_command(message: Message, bot: Bot):
     user_id = message.chat.id
     if not has_valid_access(user_id): return await message.reply("You are not authorized.")
     token = await get_current_account(user_id)
@@ -153,9 +151,7 @@ async def lounge_command(message: Message):
     custom_message = parts[1]
     spam_enabled = await get_individual_spam_filter(user_id, "lounge")
     status_message = await message.reply(f"<b>Starting Lounge Messaging...</b>", parse_mode="HTML")
-    # FIX: Added 'user_id' as the last argument
     await send_lounge(token, custom_message, status_message, bot, user_id, spam_enabled, user_id)
-
 
 @router.message(Command("chatroom"))
 async def send_to_all_command(message: Message):
@@ -170,8 +166,6 @@ async def send_to_all_command(message: Message):
     custom_message = parts[1]
     spam_enabled = await get_individual_spam_filter(user_id, "chatroom")
     status_message = await message.reply("<b>Starting Chatroom Messages...</b>", parse_mode="HTML")
-
-    # --- FIX: Create sent_ids and lock for the single-token function call ---
     sent_ids = await is_already_sent(user_id, "chatroom", None, bulk=True) if spam_enabled else set()
     sent_ids_lock = asyncio.Lock()
     
@@ -182,7 +176,7 @@ async def send_to_all_command(message: Message):
     await status_message.edit_text(f"<b>Complete</b>\nTotal: {total}, Sent: {sent}, Filtered: {filtered}", parse_mode="HTML")
 
 @router.message(Command("send_chat_all"))
-async def send_chat_all(message: Message):
+async def send_chat_all(message: Message, bot: Bot):
     user_id = message.chat.id
     if not has_valid_access(user_id): return await message.reply("You are not authorized.")
     parts = message.text.split(maxsplit=1)
@@ -197,7 +191,6 @@ async def send_chat_all(message: Message):
     spam_enabled = await get_individual_spam_filter(user_id, "chatroom")
     status = await message.reply(f"<b>Starting Multi-Account Chatroom ({len(tokens)})...</b>", parse_mode="HTML")
     
-    # --- FIX: Changed use_in_memory_deduplication from False to True to enable spam filter ---
     await send_message_to_everyone_all_tokens(
         tokens, custom_message, status, bot, user_id, spam_enabled, token_names, True, user_id
     )
@@ -224,7 +217,7 @@ async def invoke_command(message: Message):
 
     if disabled_accounts:
         for token_obj in disabled_accounts: await delete_token(user_id, token_obj["token"])
-        removed_names = "\n".join([f"â€¢ {html.escape(acc['name'])}" for acc in disabled_accounts])
+        removed_names = "\n".join([f"• {html.escape(acc['name'])}" for acc in disabled_accounts])
         await status_msg.edit_text(f"<b>Cleanup Complete</b>\nWorking: {len(working_accounts)}\nRemoved: {len(disabled_accounts)}\n\n<b>Removed accounts:</b>\n{removed_names}", parse_mode="HTML")
     else:
         await status_msg.edit_text(f"<b>All Accounts Working ({len(working_accounts)} total).</b>", parse_mode="HTML")
@@ -259,12 +252,18 @@ async def add_person_command(message: Message):
         logger.error(f"Error adding person by ID: {e}")
         await message.reply("An error occurred.")
 
+# --- General Message and Callback Handlers ---
+
 @router.message()
-async def handle_new_token(message: Message):
-    if message.text and message.text.startswith("/"): return
+async def message_router(message: Message, bot: Bot):
+    """Handles all non-command messages."""
+    if message.text and message.text.startswith("/"): return # Ignore other commands
     user_id = message.from_user.id
     if message.from_user.is_bot: return
-    if await signup_message_handler(message): return
+
+    # FIX: Pass the 'bot' object to the signup message handler
+    if await signup_message_handler(message, bot):
+        return
 
     state = db_operation_states.get(user_id)
     if state:
@@ -303,7 +302,7 @@ async def handle_new_token(message: Message):
                 return await verification_msg.edit_text("<b>Verification Error</b>.", parse_mode="HTML")
 
         account_name = token_data[1] if len(token_data) > 1 else f"Account {len(await get_tokens(user_id)) + 1}"
-        await set_token(user_id, token, account_name) # Fixed: Only pass 3 arguments, not 4
+        await set_token(user_id, token, account_name)
         await verification_msg.edit_text(f"<b>Token Verified</b> and saved as '<code>{html.escape(account_name)}</code>'.", parse_mode="HTML")
 
 async def show_manage_accounts_menu(callback_query: CallbackQuery):
@@ -327,10 +326,15 @@ async def show_manage_accounts_menu(callback_query: CallbackQuery):
         await callback_query.answer()
 
 @router.callback_query()
-async def callback_handler(callback_query: CallbackQuery):
+async def callback_handler(callback_query: CallbackQuery, bot: Bot):
+    """Handles all callback queries."""
     user_id = callback_query.from_user.id
     data = callback_query.data
-    if await signup_callback_handler(callback_query): return
+    
+    # FIX: Pass the 'bot' object to the signup callback handler
+    if await signup_callback_handler(callback_query, bot):
+        return
+        
     if not has_valid_access(user_id): return await callback_query.answer("You are not authorized.")
     
     state = user_states.setdefault(user_id, {})
@@ -369,7 +373,7 @@ async def callback_handler(callback_query: CallbackQuery):
         await callback_query.message.edit_text("<b>Settings Menu</b>", reply_markup=await get_settings_menu(user_id), parse_mode="HTML")
     elif data == "show_filters":
         await callback_query.message.edit_text("<b>Filter Settings</b>", reply_markup=await get_meeff_filter_main_keyboard(user_id), parse_mode="HTML")
-    elif data in ("toggle_request_filter", "meeff_filter_main") or data.startswith(("account_filter_", "account_gender_", "account_age_", "account_nationality_")):
+    elif data in ("toggle_request_filter", "meeff_filter_main") or data.startswith(("account_filter_", "account_gender_", "account_age_", "account_nationality_")):<
         await set_account_filter(callback_query)
     elif data == "manage_accounts":
         await show_manage_accounts_menu(callback_query)
@@ -403,7 +407,11 @@ async def callback_handler(callback_query: CallbackQuery):
         else:
             new_status = not await get_individual_spam_filter(user_id, filter_type)
             await set_individual_spam_filter(user_id, filter_type, new_status)
-        await callback_handler(callback_query.model_copy(update={'data': 'spam_filter_menu'}))
+        
+        # Create a new callback query object to re-trigger the menu
+        new_callback_query = callback_query.model_copy(update={'data': 'spam_filter_menu'})
+        await callback_handler(new_callback_query, bot) # Pass bot here too
+        
     elif data.startswith("set_account_"):
         idx = int(data.split("_")[-1])
         tokens = await get_tokens(user_id)
@@ -444,7 +452,7 @@ async def callback_handler(callback_query: CallbackQuery):
             await bot.pin_chat_message(chat_id=user_id, message_id=msg.message_id)
             asyncio.create_task(run_all_countries(user_id, state, bot, get_current_account))
 
-async def set_bot_commands():
+async def set_bot_commands(bot: Bot):
     commands = [BotCommand(command=c, description=d) for c, d in [
         ("start", "Start the bot"), ("lounge", "Send message in the lounge"),
         ("send_lounge_all", "Send lounge message to all accounts"), ("chatroom", "Send message in chatrooms"),
@@ -455,9 +463,12 @@ async def set_bot_commands():
     await bot.set_my_commands(commands)
 
 async def main():
+    bot = Bot(token=API_TOKEN)
+    dp = Dispatcher()
+    dp.include_router(router)
+    
     try:
-        await set_bot_commands()
-        dp.include_router(router)
+        await set_bot_commands(bot)
         logger.info("Starting bot polling...")
         await dp.start_polling(bot)
     except Exception as e:
