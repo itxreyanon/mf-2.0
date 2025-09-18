@@ -104,12 +104,17 @@ def format_user(user):
     )
 
 async def process_users(session, users, token, user_id, bot, token_name, already_sent_ids, lock):
-    """Process a batch of users, sending friend requests and handling spam filters atomically."""
+    """
+    Process a batch of users, sending friend requests.
+    Always prevents sending to the same user ID within the current AIO session.
+    Persists sent IDs to the database only if the spam filter is enabled.
+    """
     state = user_states[user_id]
     added_count = 0
     filtered_count = 0
     limit_reached = False
     
+    # Check if the spam filter is enabled for database persistence
     is_spam_filter_enabled = await get_individual_spam_filter(user_id, "request")
     ids_to_persist = []
 
@@ -120,12 +125,17 @@ async def process_users(session, users, token, user_id, bot, token_name, already
 
         user_id_to_check = user["_id"]
 
-        if is_spam_filter_enabled:
-            async with lock:
-                if user_id_to_check in already_sent_ids:
-                    filtered_count += 1
-                    continue
-                already_sent_ids.add(user_id_to_check)
+        # --- MODIFICATION START ---
+        # Always check for duplicates within the current multi-token session.
+        # This prevents one token from adding a user that another token is also processing.
+        async with lock:
+            if user_id_to_check in already_sent_ids:
+                filtered_count += 1
+                continue  # Skip this user as they've been processed in this session
+            
+            # Add to the in-memory set for this session to prevent other workers from picking it up
+            already_sent_ids.add(user_id_to_check)
+        # --- MODIFICATION END ---
         
         url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user_id_to_check}&isOkay=1"
         base_headers = {"meeff-access-token": token}
@@ -140,10 +150,12 @@ async def process_users(session, users, token, user_id, bot, token_name, already
                     limit_reached = True
                     break
 
+                # --- MODIFICATION ---
+                # Only prepare the ID for database persistence if the filter is enabled
                 if is_spam_filter_enabled:
                     ids_to_persist.append(user_id_to_check)
 
-                # --- NEW FASTER METHOD ---
+                # --- (The rest of the message sending logic remains the same) ---
                 details = format_user(user)
                 first_photo_url = user.get('photoUrls', [None])[0]
 
@@ -170,11 +182,11 @@ async def process_users(session, users, token, user_id, bot, token_name, already
             logging.error(f"Error processing user with {token_name}: {e}")
             await asyncio.sleep(PER_ERROR_DELAY)
     
+    # Only save to the database if the spam filter is on
     if is_spam_filter_enabled and ids_to_persist:
         await bulk_add_sent_ids(user_id, "request", ids_to_persist)
 
     return limit_reached, added_count, filtered_count
-
 
 async def run_requests(user_id, bot, target_channel_id):
     """Main function to run the request process for a single token."""
