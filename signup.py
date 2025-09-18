@@ -1,3 +1,4 @@
+
 import aiohttp
 import json
 import random
@@ -340,7 +341,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             state["stage"] = "ask_num_accounts"
             user_signup_states[user_id] = state
             await callback.message.edit_text(
-                "<b>Account Creation</b>\n\nEnter the number of accounts to create (1-20):",
+                "<b>Account Creation</b>\n\nEnter the number of accounts to create (1-10):",
                 reply_markup=BACK_TO_SIGNUP,
                 parse_mode="HTML"
             )
@@ -356,7 +357,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         state["filter_nationality"] = code if code != "all" else ""
         await show_signup_preview(callback.message, user_id, state)
     elif data == "create_accounts_confirm":
-        await callback.answer()  # Answer early to avoid timeout
+        await callback.message.edit_text("<b>Creating Accounts</b>...", parse_mode="HTML")
         config = await get_signup_config(user_id) or {}
         num_accounts = state.get("num_accounts", 1)
         selected_emails = state.get("selected_emails", [])
@@ -367,10 +368,8 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 parse_mode="HTML"
             )
             return True
-        await callback.message.edit_text("<b>Creating Accounts</b>\n0/{}...".format(len(selected_emails)), parse_mode="HTML")
         created_accounts = []
-        failed_emails = []
-        for i, email in enumerate(selected_emails[:num_accounts]):
+        for email in selected_emails[:num_accounts]:
             acc_state = {
                 "email": email,
                 "password": config.get("password"),
@@ -388,22 +387,12 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                     "name": acc_state["name"],
                     "password": config.get("password")
                 })
-            else:
-                failed_emails.append(email)
-            # Progress update
-            progress_text = "<b>Creating Accounts</b>\n{}/{}...".format(len(created_accounts), len(selected_emails))
-            if failed_emails:
-                progress_text += "\nFailed: {}".format(len(failed_emails))
-            await callback.message.edit_text(progress_text, parse_mode="HTML")
         state["created_accounts"] = created_accounts
         state["verified_accounts"] = []
         state["pending_accounts"] = created_accounts.copy()
         result_text = (
-            f"<b>Account Creation Results</b>\n\n"
-            f"<b>Created:</b> {len(created_accounts)} account{'s' if len(created_accounts) != 1 else ''}\n"
+            f"<b>Account Creation Results</b>\n\n<b>Created:</b> {len(created_accounts)} account{'s' if len(created_accounts) != 1 else ''}\n\n"
         )
-        if failed_emails:
-            result_text += f"<b>Failed:</b> {len(failed_emails)} (emails: {', '.join(failed_emails[-3:])}...)\n"  # Show last 3 failed
         if created_accounts:
             result_text += "<b>Created Accounts:</b>\n" + '\n'.join([
                 f"• {a['name']} - <code>{a['email']}</code>" for a in created_accounts
@@ -415,7 +404,6 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             parse_mode="HTML"
         )
     elif data == "verify_accounts" or data == "retry_pending":
-        await callback.answer()  # Answer early to avoid timeout
         pending = state.get("pending_accounts", [])
         if not pending:
             await callback.message.edit_text(
@@ -424,12 +412,11 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 parse_mode="HTML"
             )
             return True
-        await callback.message.edit_text("<b>Verifying Accounts</b>\n0/{}...".format(len(pending)), parse_mode="HTML")
+        await callback.message.edit_text("<b>Verifying Accounts</b>...", parse_mode="HTML")
         verified = state.get("verified_accounts", [])
         new_pending = []
-        failed_signins = []
         filter_nat = state.get("filter_nationality", "")
-        for i, acc in enumerate(pending):
+        for acc in pending:
             res = await try_signin(acc["email"], acc["password"], user_id)
             if res.get("accessToken") and res.get("user"):
                 token = res["accessToken"]
@@ -448,14 +435,6 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
                 verified.append(acc)
             else:
                 new_pending.append(acc)
-                failed_signins.append(acc["email"])
-            # Progress update
-            progress_text = "<b>Verifying Accounts</b>\nVerified: {}/{} | Pending: {}".format(
-                len(verified), len(pending), len(new_pending)
-            )
-            if failed_signins:
-                progress_text += "\nFailed: {}".format(len(failed_signins))
-            await callback.message.edit_text(progress_text, parse_mode="HTML")
         state["verified_accounts"] = verified
         state["pending_accounts"] = new_pending
         if not new_pending:
@@ -497,6 +476,7 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
         return False
     
     user_signup_states[user_id] = state
+    await callback.answer()
     return True
 
 async def signup_message_handler(message: Message) -> bool:
@@ -555,18 +535,9 @@ async def signup_message_handler(message: Message) -> bool:
     elif stage == "ask_num_accounts":
         try:
             num = int(text)
-            if not 1 <= num <= 20:  # Reduced max to 20 to avoid excessive time
+            if not 1 <= num <= 30:
                 raise ValueError()
-            config = await get_signup_config(user_id) or {}
-            pending_emails = [acc['email'] for acc in state.get('pending_accounts', [])]
-            available_emails = await select_available_emails(config.get("email", ""), num, pending_emails)
-            actual_num = len(available_emails)
-            state["num_accounts"] = min(num, actual_num)
-            state["selected_emails"] = available_emails  # Pre-store for preview
-            if actual_num < num:
-                await message.answer(f"<b>Availability Check</b>\n\nOnly {actual_num} email variations available out of {num} requested. Proceeding with {actual_num} accounts.", parse_mode="HTML")
-            else:
-                await message.answer(f"<b>Availability Check</b>\n\n{actual_num} email variations available.", parse_mode="HTML")
+            state["num_accounts"] = num
             state["stage"] = "ask_name"
             await message.answer(
                 "<b>Display Name</b>\nEnter the display name for the account(s):",
@@ -574,7 +545,7 @@ async def signup_message_handler(message: Message) -> bool:
                 parse_mode="HTML"
             )
         except ValueError:
-            await message.answer("Invalid number (1-20). Please try again:", parse_mode="HTML")
+            await message.answer("Invalid number (1-30). Please try again:", parse_mode="HTML")
             return True
     elif stage == "ask_name":
         state["name"] = text
