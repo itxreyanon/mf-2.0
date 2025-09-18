@@ -29,6 +29,7 @@ from allcountry import run_all_countries
 from signup import signup_command, signup_callback_handler, signup_message_handler, signup_settings_command
 from friend_requests import run_requests, process_all_tokens, user_states, stop_markup
 from device_info import get_or_create_device_info_for_token, get_headers_with_device_info
+from batch_manager import handle_batch_callback, get_batch_management_menu, auto_assign_new_account_to_batch
 
 # --- Configuration & Setup ---
 API_TOKEN = "7916536914:AAHwtvO8hfGl2U4xcfM1fAjMLNypPFEW5JQ"
@@ -56,7 +57,8 @@ async def get_settings_menu(user_id: int) -> InlineKeyboardMarkup:
     spam_filters = await get_all_spam_filters(user_id)
     any_spam_on = any(spam_filters.values())
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Manage Accounts", callback_data="manage_accounts"), InlineKeyboardButton(text="Meeff Filters", callback_data="show_filters")],
+        [InlineKeyboardButton(text="Manage Accounts", callback_data="manage_accounts"), InlineKeyboardButton(text="Batch Management", callback_data="batch_management")],
+        [InlineKeyboardButton(text="Meeff Filters", callback_data="show_filters")],
         [InlineKeyboardButton(text=f"Spam Filters: {'ON' if any_spam_on else 'OFF'}", callback_data="spam_filter_menu")],
         [InlineKeyboardButton(text="DB Settings", callback_data="db_settings"), InlineKeyboardButton(text="Back", callback_data="back_to_menu")]
     ])
@@ -305,6 +307,11 @@ async def handle_new_token(message: Message):
         account_name = token_data[1] if len(token_data) > 1 else f"Account {len(await get_tokens(user_id)) + 1}"
         await set_token(user_id, token, account_name) # Fixed: Only pass 3 arguments, not 4
         await verification_msg.edit_text(f"<b>Token Verified</b> and saved as '<code>{html.escape(account_name)}</code>'.", parse_mode="HTML")
+        
+        # Auto-assign to batch
+        batch_number = await auto_assign_new_account_to_batch(user_id, token)
+        if batch_number:
+            await message.reply(f"📦 Account automatically assigned to <b>Batch {batch_number}</b>", parse_mode="HTML")
 
 async def show_manage_accounts_menu(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
@@ -331,6 +338,7 @@ async def callback_handler(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     data = callback_query.data
     if await signup_callback_handler(callback_query): return
+    if await handle_batch_callback(callback_query): return
     if not has_valid_access(user_id): return await callback_query.answer("You are not authorized.")
     
     state = user_states.setdefault(user_id, {})

@@ -11,6 +11,7 @@ from dateutil import parser
 from device_info import get_or_create_device_info_for_email, get_api_payload_with_device_info
 from db import set_token, set_info_card, set_signup_config, get_signup_config, set_user_filters
 from filters import get_nationality_keyboard
+from batch_manager import auto_assign_new_account_to_batch
 
 # Logging configuration
 logger = logging.getLogger(__name__)
@@ -420,6 +421,10 @@ async def signup_callback_handler(callback: CallbackQuery) -> bool:
             if res.get("accessToken") and res.get("user"):
                 token = res["accessToken"]
                 await set_token(user_id, token, acc["name"], acc["email"])
+                
+                # Auto-assign to batch
+                batch_number = await auto_assign_new_account_to_batch(user_id, token)
+                
                 await set_user_filters(user_id, token, {"filterNationalityCode": filter_nat})
                 res["user"].update({
                     "email": acc["email"],
@@ -720,6 +725,10 @@ async def store_token_and_show_card(msg_obj: Message, login_result: Dict, creds:
     if access_token and user_data:
         user_id = msg_obj.chat.id
         await set_token(user_id, access_token, user_data.get("name", creds.get("email")), creds.get("email"))
+        
+        # Auto-assign to batch
+        batch_number = await auto_assign_new_account_to_batch(user_id, access_token)
+        
         user_data.update({
             "email": creds.get("email"),
             "password": creds.get("password"),
