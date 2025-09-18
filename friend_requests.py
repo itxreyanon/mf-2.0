@@ -88,7 +88,6 @@ def format_user(user):
         height_val, height_unit = height.split("|", 1)
         height = f"{height_val.strip()} {height_unit.strip()}"
         
-    # We remove the "Photos: ..." line because the photo will be sent directly
     return (
         f"<b>Name:</b> {html.escape(user.get('name', 'N/A'))}\n"
         f"<b>ID:</b> <code>{html.escape(user.get('_id', 'N/A'))}</code>\n"
@@ -114,7 +113,6 @@ async def process_users(session, users, token, user_id, bot, token_name, already
     filtered_count = 0
     limit_reached = False
     
-    # Check if the spam filter is enabled for database persistence
     is_spam_filter_enabled = await get_individual_spam_filter(user_id, "request")
     ids_to_persist = []
 
@@ -125,17 +123,12 @@ async def process_users(session, users, token, user_id, bot, token_name, already
 
         user_id_to_check = user["_id"]
 
-        # --- MODIFICATION START ---
         # Always check for duplicates within the current multi-token session.
-        # This prevents one token from adding a user that another token is also processing.
         async with lock:
             if user_id_to_check in already_sent_ids:
                 filtered_count += 1
-                continue  # Skip this user as they've been processed in this session
-            
-            # Add to the in-memory set for this session to prevent other workers from picking it up
+                continue
             already_sent_ids.add(user_id_to_check)
-        # --- MODIFICATION END ---
         
         url = f"https://api.meeff.com/user/undoableAnswer/v5/?userId={user_id_to_check}&isOkay=1"
         base_headers = {"meeff-access-token": token}
@@ -150,12 +143,9 @@ async def process_users(session, users, token, user_id, bot, token_name, already
                     limit_reached = True
                     break
 
-                # --- MODIFICATION ---
-                # Only prepare the ID for database persistence if the filter is enabled
                 if is_spam_filter_enabled:
                     ids_to_persist.append(user_id_to_check)
 
-                # --- (The rest of the message sending logic remains the same) ---
                 details = format_user(user)
                 first_photo_url = user.get('photoUrls', [None])[0]
 
@@ -182,11 +172,11 @@ async def process_users(session, users, token, user_id, bot, token_name, already
             logging.error(f"Error processing user with {token_name}: {e}")
             await asyncio.sleep(PER_ERROR_DELAY)
     
-    # Only save to the database if the spam filter is on
     if is_spam_filter_enabled and ids_to_persist:
         await bulk_add_sent_ids(user_id, "request", ids_to_persist)
 
     return limit_reached, added_count, filtered_count
+
 
 async def run_requests(user_id, bot, target_channel_id):
     """Main function to run the request process for a single token."""
@@ -204,13 +194,21 @@ async def run_requests(user_id, bot, target_channel_id):
     
     already_sent_ids = await get_already_sent_ids(user_id, "request")
     lock = asyncio.Lock()
+    
+    # --- MODIFICATION START ---
+    batch_count = 0  # Initialize a counter for batches
+    # --- MODIFICATION END ---
 
     async with aiohttp.ClientSession() as session:
         while state["running"]:
             try:
-                if is_request_filter_enabled(user_id):
+                # --- MODIFICATION START ---
+                # Only apply the filter after the first batch has been processed
+                if batch_count > 0 and is_request_filter_enabled(user_id):
+                    logging.info(f"Batch {batch_count + 1}: Applying filter for {token_name}")
                     await apply_filter_for_account(token, user_id)
                     await asyncio.sleep(1)
+                # --- MODIFICATION END ---
                 
                 await bot.edit_message_text(
                     chat_id=user_id,
@@ -243,6 +241,11 @@ async def run_requests(user_id, bot, target_channel_id):
                     continue
                 
                 limit_reached, _, _ = await process_users(session, users, token, user_id, bot, token_name, already_sent_ids, lock)
+                
+                # --- MODIFICATION START ---
+                batch_count += 1  # Increment the counter at the end of the loop cycle
+                # --- MODIFICATION END ---
+                
                 if limit_reached:
                     state["running"] = False
                     break
@@ -283,7 +286,15 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
         } for i, token_obj in enumerate(tokens)
     }
     
-    session_sent_ids = await get_already_sent_ids(user_id, "request")
+    is_spam_filter_enabled = await get_individual_spam_filter(user_id, "request")
+
+    if is_spam_filter_enabled:
+        logging.info("Spam filter is ON. Fetching previously sent user IDs from the database.")
+        session_sent_ids = await get_already_sent_ids(user_id, "request")
+    else:
+        logging.info("Spam filter is OFF. Starting with an empty set of sent IDs for this session.")
+        session_sent_ids = set()
+    
     lock = asyncio.Lock()
 
     async def _worker(token_obj):
@@ -291,12 +302,20 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
         name = token_status[token]["name"]
         empty_batches = 0
         
+        # --- MODIFICATION START ---
+        batch_count = 0  # Initialize a batch counter for this specific worker
+        # --- MODIFICATION END ---
+        
         async with aiohttp.ClientSession() as session:
             while state["running"]:
                 try:
-                    if is_request_filter_enabled(user_id):
+                    # --- MODIFICATION START ---
+                    # Only apply the filter after the first batch has been processed
+                    if batch_count > 0 and is_request_filter_enabled(user_id):
+                        logging.info(f"Batch {batch_count + 1}: Applying filter for {name}")
                         await apply_filter_for_account(token, user_id)
                         await asyncio.sleep(1)
+                    # --- MODIFICATION END ---
 
                     users = await fetch_users(session, token, user_id)
                     
@@ -324,6 +343,10 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
                     if limit_reached:
                         token_status[token]["status"] = "Limit Full"
                         return
+                    
+                    # --- MODIFICATION START ---
+                    batch_count += 1  # Increment the counter at the end of the loop cycle
+                    # --- MODIFICATION END ---
                         
                     await asyncio.sleep(PER_BATCH_DELAY)
 
@@ -334,13 +357,14 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
         
         token_status[token]["status"] = "Stopped"
 
+    # The rest of the function (_refresh_ui, task creation, etc.) remains the same
     async def _refresh_ui():
         last_message = ""
         while state["running"]:
             total_added_now = sum(status["added"] for status in token_status.values())
             header = f"🔄 <b>AIO Requests</b> | <b>Added:</b> {total_added_now}"
             
-            lines = [header, "", "<pre>Account   │Added │Filter│Status      </pre>"]
+            lines = [header, "", "<pre>Account    │Added │Filter│Status      </pre>"]
             for status in token_status.values():
                 name = status["name"]
                 display = name[:10] + '…' if len(name) > 10 else name.ljust(10)
@@ -359,12 +383,10 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
                         logging.error(f"Status update failed: {e}")
             await asyncio.sleep(1)
 
-    # Start UI updater and workers
     ui_task = asyncio.create_task(_refresh_ui())
     worker_tasks = [asyncio.create_task(_worker(token_obj)) for token_obj in tokens]
     await asyncio.gather(*worker_tasks, return_exceptions=True)
 
-    # Clean up
     state["running"] = False
     await asyncio.sleep(1.1)
     ui_task.cancel()
@@ -372,12 +394,11 @@ async def process_all_tokens(user_id, tokens, bot, target_channel_id):
         try: await bot.unpin_chat_message(chat_id=user_id, message_id=state["pinned_message_id"])
         except Exception: pass
 
-    # Final Status UI
     total_added = sum(status["added"] for status in token_status.values())
     completion_status = "⚠️ Process Stopped" if state.get("stopped") else "✅ AIO Requests Completed"
     final_header = f"<b>{completion_status}</b> | <b>Total Added:</b> {total_added}"
     
-    final_lines = [final_header, "", "<pre>Account   │Added │Filter│Status      </pre>"]
+    final_lines = [final_header, "", "<pre>Account    │Added │Filter│Status      </pre>"]
     for status in token_status.values():
         name = status["name"]
         display = name[:10] + '…' if len(name) > 10 else name.ljust(10)
