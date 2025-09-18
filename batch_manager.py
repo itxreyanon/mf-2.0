@@ -24,8 +24,8 @@ def get_total_batches(tokens: List[Dict]) -> int:
     """Get total number of batches"""
     return math.ceil(len(tokens) / ACCOUNTS_PER_BATCH) if tokens else 0
 
-async def get_batch_management_menu(user_id: int, current_page: int = 1) -> InlineKeyboardMarkup:
-    """Main batch management menu with pagination"""
+async def get_batch_management_menu(user_id: int) -> InlineKeyboardMarkup:
+    """Main batch management menu that shows all batches without pagination."""
     tokens = await get_tokens(user_id)
     total_batches = get_total_batches(tokens)
     
@@ -37,94 +37,52 @@ async def get_batch_management_menu(user_id: int, current_page: int = 1) -> Inli
     
     keyboard = []
     
-    # Show 5 batches per page
-    batches_per_page = 5
-    start_batch = (current_page - 1) * batches_per_page + 1
-    end_batch = min(start_batch + batches_per_page - 1, total_batches)
-    
-    # Batch buttons
-    for batch_num in range(start_batch, end_batch + 1):
+    # Loop through all available batches
+    for batch_num in range(1, total_batches + 1):
         batch_accounts = get_accounts_in_batch(tokens, batch_num)
         active_count = sum(1 for acc in batch_accounts if acc.get('active', True))
         total_count = len(batch_accounts)
-        
-        # Get nationality filter for this batch (from first account)
-        nationality = ""
+
+        # Button 1: Batch Name (Links directly to account list)
+        batch_name_btn = InlineKeyboardButton(
+            text=f"Batch {batch_num} ({active_count}/{total_count})",
+            callback_data=f"batch_{batch_num}_view"
+        )
+
+        # Button 2: Simple ON/OFF Toggle
+        if active_count == total_count and total_count > 0:
+            # If all accounts are ON, the button shows "ON" and its action is to turn them OFF.
+            toggle_text = "ON"
+            toggle_callback = f"batch_{batch_num}_all_off"
+        else:
+            # If any account is OFF, the button shows "OFF" and its action is to turn them all ON.
+            toggle_text = "OFF"
+            toggle_callback = f"batch_{batch_num}_all_on"
+            
+        toggle_btn = InlineKeyboardButton(text=toggle_text, callback_data=toggle_callback)
+
+        # Button 3: Nationality
+        nationality = "All"
         if batch_accounts:
             first_token = batch_accounts[0]['token']
             filters = await get_user_filters(user_id, first_token) or {}
-            nationality = filters.get('filterNationalityCode', '')
+            code = filters.get('filterNationalityCode')
+            nationality = code.upper() if code else "All"
         
-        nationality_display = f" ({nationality})" if nationality else ""
-        status_text = f"Batch {batch_num} - {active_count}/{total_count}{nationality_display}"
+        nationality_btn = InlineKeyboardButton(
+            text=nationality,
+            callback_data=f"batch_{batch_num}_nationality"
+        )
         
-        keyboard.append([
-            InlineKeyboardButton(
-                text=status_text,
-                callback_data=f"batch_manage_{batch_num}"
-            )
-        ])
-    
-    # Navigation buttons
-    nav_buttons = []
-    if current_page > 1:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"batch_page_{current_page-1}"))
-    
-    total_pages = math.ceil(total_batches / batches_per_page)
-    if current_page < total_pages:
-        nav_buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"batch_page_{current_page+1}"))
-    
-    if nav_buttons:
-        keyboard.append(nav_buttons)
+        keyboard.append([batch_name_btn, toggle_btn, nationality_btn])
     
     # Global controls
     keyboard.append([
-        InlineKeyboardButton(text="🔛 All Batches ON", callback_data="batch_all_on"),
-        InlineKeyboardButton(text="🔴 All Batches OFF", callback_data="batch_all_off")
+        InlineKeyboardButton(text="All Batches ON", callback_data="batch_all_on"),
+        InlineKeyboardButton(text="All Batches OFF", callback_data="batch_all_off")
     ])
     
-    keyboard.append([
-        InlineKeyboardButton(text="🔙 Back", callback_data="settings_menu")
-    ])
-    
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-async def get_single_batch_menu(user_id: int, batch_number: int) -> InlineKeyboardMarkup:
-    """Menu for managing a single batch"""
-    tokens = await get_tokens(user_id)
-    batch_accounts = get_accounts_in_batch(tokens, batch_number)
-    
-    if not batch_accounts:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Back", callback_data="batch_management")]
-        ])
-    
-    active_count = sum(1 for acc in batch_accounts if acc.get('active', True))
-    total_count = len(batch_accounts)
-    
-    # Get current nationality filter
-    first_token = batch_accounts[0]['token']
-    filters = await get_user_filters(user_id, first_token) or {}
-    current_nationality = filters.get('filterNationalityCode', 'All Countries')
-    if current_nationality == '':
-        current_nationality = 'All Countries'
-    
-    keyboard = [
-        [InlineKeyboardButton(
-            text=f"📊 Batch {batch_number} Status: {active_count}/{total_count} Active",
-            callback_data="dummy"
-        )],
-        [
-            InlineKeyboardButton(text="🔛 Turn All ON", callback_data=f"batch_{batch_number}_all_on"),
-            InlineKeyboardButton(text="🔴 Turn All OFF", callback_data=f"batch_{batch_number}_all_off")
-        ],
-        [InlineKeyboardButton(
-            text=f"🌍 Nationality: {current_nationality}",
-            callback_data=f"batch_{batch_number}_nationality"
-        )],
-        [InlineKeyboardButton(text="👥 View Accounts", callback_data=f"batch_{batch_number}_view")],
-        [InlineKeyboardButton(text="🔙 Back", callback_data="batch_management")]
-    ]
+    keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="settings_menu")])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -147,7 +105,7 @@ async def get_batch_accounts_view(user_id: int, batch_number: int) -> InlineKeyb
         ])
     
     keyboard.append([
-        InlineKeyboardButton(text="🔙 Back", callback_data=f"batch_manage_{batch_number}")
+        InlineKeyboardButton(text="🔙 Back", callback_data="batch_management") # Changed back button to go to main menu
     ])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -155,14 +113,14 @@ async def get_batch_accounts_view(user_id: int, batch_number: int) -> InlineKeyb
 def get_batch_nationality_keyboard(batch_number: int) -> InlineKeyboardMarkup:
     """Nationality selection for batch"""
     countries = [
-        ("", "🌍 All Countries"),
-        ("RU", "🇷🇺 Russia"), ("UA", "🇺🇦 Ukraine"), ("BY", "🇧🇾 Belarus"),
-        ("IR", "🇮🇷 Iran"), ("PH", "🇵🇭 Philippines"), ("PK", "🇵🇰 Pakistan"),
-        ("US", "🇺🇸 USA"), ("IN", "🇮🇳 India"), ("DE", "🇩🇪 Germany"),
-        ("FR", "🇫🇷 France"), ("BR", "🇧🇷 Brazil"), ("CN", "🇨🇳 China"),
-        ("JP", "🇯🇵 Japan"), ("KR", "🇰🇷 Korea"), ("CA", "🇨🇦 Canada"),
-        ("AU", "🇦🇺 Australia"), ("IT", "🇮🇹 Italy"), ("ES", "🇪🇸 Spain"),
-        ("ZA", "🇿🇦 South Africa"), ("TR", "🇹🇷 Turkey")
+        ("", "All Countries"),
+        ("RU", "Russia"), ("UA", "Ukraine"), ("BY", "Belarus"),
+        ("IR", "Iran"), ("PH", "Philippines"), ("PK", "Pakistan"),
+        ("US", "USA"), ("IN", "India"), ("DE", "Germany"),
+        ("FR", "France"), ("BR", "Brazil"), ("CN", "China"),
+        ("JP", "Japan"), ("KR", "Korea"), ("CA", "Canada"),
+        ("AU", "Australia"), ("IT", "Italy"), ("ES", "Spain"),
+        ("ZA", "South Africa"), ("TR", "Turkey")
     ]
     
     keyboard = []
@@ -180,7 +138,7 @@ def get_batch_nationality_keyboard(batch_number: int) -> InlineKeyboardMarkup:
         keyboard.append(row)
     
     keyboard.append([
-        InlineKeyboardButton(text="🔙 Back", callback_data=f"batch_manage_{batch_number}")
+        InlineKeyboardButton(text="🔙 Back", callback_data="batch_management") # Changed back button
     ])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -234,68 +192,41 @@ async def handle_batch_callback(callback_query: CallbackQuery) -> bool:
     if data == "batch_management":
         await callback_query.message.edit_text(
             "🗂️ <b>Batch Management</b>\n\n"
-            f"Manage your accounts in batches of {ACCOUNTS_PER_BATCH}.\n"
-            "Each batch can have its own nationality filter and on/off status.",
+            f"Manage your accounts in batches of {ACCOUNTS_PER_BATCH}.",
             reply_markup=await get_batch_management_menu(user_id),
             parse_mode="HTML"
         )
         await callback_query.answer()
         return True
     
-    elif data.startswith("batch_page_"):
-        page = int(data.split("_")[-1])
-        await callback_query.message.edit_text(
-            "🗂️ <b>Batch Management</b>\n\n"
-            f"Manage your accounts in batches of {ACCOUNTS_PER_BATCH}.\n"
-            "Each batch can have its own nationality filter and on/off status.",
-            reply_markup=await get_batch_management_menu(user_id, page),
-            parse_mode="HTML"
-        )
-        await callback_query.answer()
-        return True
-    
-    elif data.startswith("batch_manage_"):
-        batch_number = int(data.split("_")[-1])
-        tokens = await get_tokens(user_id)
-        batch_accounts = get_accounts_in_batch(tokens, batch_number)
-        
-        await callback_query.message.edit_text(
-            f"🗂️ <b>Batch {batch_number} Management</b>\n\n"
-            f"Managing {len(batch_accounts)} accounts in this batch.\n"
-            "You can control all accounts together or individually.",
-            reply_markup=await get_single_batch_menu(user_id, batch_number),
-            parse_mode="HTML"
-        )
-        await callback_query.answer()
-        return True
-    
+    # NOTE: Obsolete handlers for pagination and the intermediate menu have been removed.
+
     elif data.startswith("batch_") and "_all_on" in data:
         batch_number = int(data.split("_")[1])
         count = await toggle_batch_status(user_id, batch_number, True)
-        await callback_query.answer(f"✅ Turned ON {count} accounts in Batch {batch_number}")
+        await callback_query.answer(f"Turned ON {count} accounts in Batch {batch_number}")
         
-        # Refresh the menu
+        # Refresh the main menu
         await callback_query.message.edit_reply_markup(
-            reply_markup=await get_single_batch_menu(user_id, batch_number)
+            reply_markup=await get_batch_management_menu(user_id)
         )
         return True
     
     elif data.startswith("batch_") and "_all_off" in data:
         batch_number = int(data.split("_")[1])
         count = await toggle_batch_status(user_id, batch_number, False)
-        await callback_query.answer(f"❌ Turned OFF {count} accounts in Batch {batch_number}")
+        await callback_query.answer(f"Turned OFF {count} accounts in Batch {batch_number}")
         
-        # Refresh the menu
+        # Refresh the main menu
         await callback_query.message.edit_reply_markup(
-            reply_markup=await get_single_batch_menu(user_id, batch_number)
+            reply_markup=await get_batch_management_menu(user_id)
         )
         return True
     
     elif data == "batch_all_on":
         count = await toggle_all_batches_status(user_id, True)
-        await callback_query.answer(f"✅ Turned ON all {count} accounts")
+        await callback_query.answer(f"Turned ON all {count} accounts")
         
-        # Refresh the menu
         await callback_query.message.edit_reply_markup(
             reply_markup=await get_batch_management_menu(user_id)
         )
@@ -303,9 +234,8 @@ async def handle_batch_callback(callback_query: CallbackQuery) -> bool:
     
     elif data == "batch_all_off":
         count = await toggle_all_batches_status(user_id, False)
-        await callback_query.answer(f"❌ Turned OFF all {count} accounts")
+        await callback_query.answer(f"Turned OFF all {count} accounts")
         
-        # Refresh the menu
         await callback_query.message.edit_reply_markup(
             reply_markup=await get_batch_management_menu(user_id)
         )
@@ -315,7 +245,7 @@ async def handle_batch_callback(callback_query: CallbackQuery) -> bool:
         batch_number = int(data.split("_")[1])
         await callback_query.message.edit_text(
             f"🌍 <b>Set Nationality Filter for Batch {batch_number}</b>\n\n"
-            "Choose a nationality filter that will be applied to all accounts in this batch:",
+            "Choose a nationality filter for this batch:",
             reply_markup=get_batch_nationality_keyboard(batch_number),
             parse_mode="HTML"
         )
@@ -327,27 +257,21 @@ async def handle_batch_callback(callback_query: CallbackQuery) -> bool:
         batch_number = int(parts[1])
         nationality_code = parts[4] if len(parts) > 4 else ""
         
-        # Show processing message
         await callback_query.message.edit_text(
-            f"⏳ <b>Applying Nationality Filter...</b>\n\n"
-            f"Setting nationality filter for Batch {batch_number}...",
+            f"⏳ Applying filter for Batch {batch_number}...",
             parse_mode="HTML"
         )
         
-        success_count, total_count = await apply_batch_nationality_filter(user_id, batch_number, nationality_code)
+        await apply_batch_nationality_filter(user_id, batch_number, nationality_code)
         nationality_display = nationality_code.upper() if nationality_code else "All Countries"
         
-        await callback_query.answer(f"✅ Applied {nationality_display} filter to Batch {batch_number}")
+        await callback_query.answer(f"Applied {nationality_display} filter to Batch {batch_number}")
         
-        # Go back to batch menu
-        tokens = await get_tokens(user_id)
-        batch_accounts = get_accounts_in_batch(tokens, batch_number)
-        
+        # Go back to main batch menu
         await callback_query.message.edit_text(
-            f"🗂️ <b>Batch {batch_number} Management</b>\n\n"
-            f"Managing {len(batch_accounts)} accounts in this batch.\n"
-            f"✅ Nationality filter applied: {nationality_display}",
-            reply_markup=await get_single_batch_menu(user_id, batch_number),
+            f"🗂️ <b>Batch Management</b>\n\n"
+            f"Manage your accounts in batches of {ACCOUNTS_PER_BATCH}.",
+            reply_markup=await get_batch_management_menu(user_id),
             parse_mode="HTML"
         )
         return True
@@ -356,7 +280,7 @@ async def handle_batch_callback(callback_query: CallbackQuery) -> bool:
         batch_number = int(data.split("_")[1])
         await callback_query.message.edit_text(
             f"👥 <b>Batch {batch_number} Accounts</b>\n\n"
-            "Click on any account to toggle its status:",
+            "Click an account to toggle its status:",
             reply_markup=await get_batch_accounts_view(user_id, batch_number),
             parse_mode="HTML"
         )
@@ -379,7 +303,7 @@ async def handle_batch_callback(callback_query: CallbackQuery) -> bool:
             await set_account_active(user_id, account['token'], new_status)
             
             status_text = "ON" if new_status else "OFF"
-            await callback_query.answer(f"✅ {account.get('name', 'Account')} turned {status_text}")
+            await callback_query.answer(f"{account.get('name', 'Account')} turned {status_text}")
             
             # Refresh the view
             await callback_query.message.edit_reply_markup(
@@ -394,7 +318,6 @@ async def auto_assign_new_account_to_batch(user_id: int, token: str):
     """Automatically assign a new account to the appropriate batch"""
     tokens = await get_tokens(user_id)
     
-    # Find the account that was just added
     account_index = None
     for i, account in enumerate(tokens):
         if account['token'] == token:
