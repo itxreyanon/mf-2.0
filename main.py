@@ -32,7 +32,7 @@ from device_info import get_or_create_device_info_for_token, get_headers_with_de
 from batch_manager import handle_batch_callback, get_batch_management_menu, auto_assign_new_account_to_batch
 
 # --- Configuration & Setup ---
-API_TOKEN = "8298119289:AAGZxvWbBswHf1R-FzSURVpDalbx_96ubyc"
+API_TOKEN = "7916536914:AAHwtvO8hfGl2U4xcfM1fAjMLNypPFEW5JQ"
 ADMIN_USER_IDS = {7405203657, 7725409374, 7691399254, 7795345443}
 TEMP_PASSWORD = "11223344"
 TARGET_CHANNEL_ID = -1002610862940
